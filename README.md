@@ -13,6 +13,7 @@
   <a href="#-architecture">Architecture</a> •
   <a href="#-installation">Install</a> •
   <a href="#-roadmap">Roadmap</a> •
+  <a href="#join-us">Join us</a> •
   <a href="#-faq">FAQ</a>
 </p>
 
@@ -31,6 +32,10 @@
 
 > [!WARNING]
 > **Alpha Status**: hashcode is in early development. There are incomplete features and known bugs. We're sharing this project because we believe the direction is worth exploring, not because it's finished. Testing, feedback, and contributions are very welcome.
+
+<h2 id="join-us">Join us</h2>
+
+If you want to test hashcode, contribute ideas, report bugs, or build this direction together, email us at <a href="mailto:3455744878@qq.com">3455744878@qq.com</a>.
 
 ---
 
