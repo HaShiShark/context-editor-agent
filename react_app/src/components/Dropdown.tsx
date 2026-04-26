@@ -19,13 +19,36 @@ export default function Dropdown({
   isOpen,
   onToggle,
 }: DropdownProps) {
+  function handleMouseDown(event: MouseEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    onToggle(event);
+  }
+
+  function handleClick(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    if (event.detail === 0) {
+      onToggle(event);
+    }
+  }
+
   return (
     <div className="dropdown-container">
-      <button className={buttonClassName} disabled={disabled} type="button" onClick={onToggle}>
+      <button
+        className={buttonClassName}
+        disabled={disabled}
+        type="button"
+        onClick={handleClick}
+        onMouseDown={handleMouseDown}
+      >
         {buttonChildren}
       </button>
       <div
         className={`dropdown-menu ${align === 'right' ? 'right-align' : ''} ${isOpen ? 'show' : ''}`.trim()}
+        onMouseDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
       >
         {children}

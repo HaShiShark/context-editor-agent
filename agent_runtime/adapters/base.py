@@ -17,6 +17,15 @@ else:
 
 
 ProviderRequestT = TypeVar("ProviderRequestT")
+REASONING_EFFORT_TOKEN_BUDGETS = {
+    "low": 512,
+    "medium": 2048,
+    "high": 8192,
+}
+
+
+def reasoning_effort_token_budget(reasoning_effort: str | None) -> int | None:
+    return REASONING_EFFORT_TOKEN_BUDGETS.get((reasoning_effort or "").strip())
 
 
 @dataclass(frozen=True, slots=True)

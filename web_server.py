@@ -4445,6 +4445,7 @@ def build_context_workbench_agent(settings: Settings, provider_id: str) -> Simpl
     provider_base_url = sanitize_text(provider.get("api_base_url") or "").strip() or settings.openai_base_url
     scoped_settings = Settings(
         model=settings.model,
+        default_reasoning_effort=settings.default_reasoning_effort,
         context_workbench_model=settings.context_workbench_model,
         context_workbench_provider_id=resolved_provider_id,
         project_root=settings.project_root,
@@ -5259,6 +5260,9 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
                 updated_settings = save_settings(
                     default_model=sanitize_text(payload.get("default_model") or "").strip() or None,
+                    default_reasoning_effort=sanitize_text(payload.get("default_reasoning_effort") or "").strip()
+                    if "default_reasoning_effort" in payload
+                    else None,
                     openai_base_url=sanitize_text(payload.get("openai_base_url") or "").strip(),
                     max_tool_rounds=max_tool_rounds,
                     assistant_name=payload.get("assistant_name") if isinstance(payload.get("assistant_name"), str) else None,

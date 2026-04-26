@@ -449,18 +449,26 @@ function translateTextNode(node: Text, locale: UiLocale) {
   }
 
   const storedOriginal = textNodeOriginals.get(node);
+  if (locale === 'zh-CN') {
+    const translatedStoredOriginal = storedOriginal ? translatePhrase(storedOriginal, 'en-US') : '';
+    if (storedOriginal && node.nodeValue === translatedStoredOriginal) {
+      node.nodeValue = storedOriginal;
+      return;
+    }
+    textNodeOriginals.set(node, node.nodeValue);
+    return;
+  }
+
   const expectedValue = storedOriginal
-    ? (locale === 'en-US' ? translatePhrase(storedOriginal, locale) : storedOriginal)
+    ? translatePhrase(storedOriginal, locale)
     : '';
-  const original = locale === 'zh-CN'
-    ? (storedOriginal || node.nodeValue)
-    : (storedOriginal && node.nodeValue === expectedValue ? storedOriginal : node.nodeValue);
+  const original = storedOriginal && node.nodeValue === expectedValue ? storedOriginal : node.nodeValue;
 
   if (original !== storedOriginal) {
     textNodeOriginals.set(node, original);
   }
 
-  const nextValue = locale === 'en-US' ? translatePhrase(original, locale) : original;
+  const nextValue = translatePhrase(original, locale);
   if (node.nodeValue !== nextValue) {
     node.nodeValue = nextValue;
   }
@@ -477,15 +485,23 @@ function translateAttributes(element: Element, locale: UiLocale) {
     }
 
     const storedOriginal = originals.get(attribute);
+    if (locale === 'zh-CN') {
+      const translatedStoredOriginal = storedOriginal ? translateAttributePhrase(storedOriginal, 'en-US') : '';
+      if (storedOriginal && current === translatedStoredOriginal) {
+        element.setAttribute(attribute, storedOriginal);
+        return;
+      }
+      originals.set(attribute, current);
+      return;
+    }
+
     const expectedValue = storedOriginal
-      ? (locale === 'en-US' ? translateAttributePhrase(storedOriginal, locale) : storedOriginal)
+      ? translateAttributePhrase(storedOriginal, locale)
       : '';
-    const original = locale === 'zh-CN'
-      ? (storedOriginal || current)
-      : (storedOriginal && current === expectedValue ? storedOriginal : current);
+    const original = storedOriginal && current === expectedValue ? storedOriginal : current;
 
     originals.set(attribute, original);
-    const nextValue = locale === 'en-US' ? translateAttributePhrase(original, locale) : original;
+    const nextValue = translateAttributePhrase(original, locale);
     if (current !== nextValue) {
       element.setAttribute(attribute, nextValue);
     }

@@ -108,10 +108,10 @@ function groupModels(models: ProviderModelCard[]) {
     .sort(([left], [right]) => compareProviderModelGroups(left, right));
 }
 
-export default function ChatModelPicker({
+function ChatModelPickerDialog({
   activeProviderId,
   currentModel,
-  open,
+  open: _open,
   providers,
   title = '选择模型',
   description = '这里展示所有已启用供应商里已经添加好的模型，点击后会直接切到对应供应商。',
@@ -181,7 +181,7 @@ export default function ChatModelPicker({
           return {
             ...entry,
             filteredCount: visibleCards.length,
-            groupedCards: groupModels(visibleCards),
+            visibleCards,
             selected: entry.provider.id === activeProviderId && entry.cards.some((card) => modelIdentifier(card) === currentModel),
           };
         })
@@ -190,10 +190,6 @@ export default function ChatModelPicker({
   );
 
   useEffect(() => {
-    if (!open) {
-      return;
-    }
-
     setSearchText('');
     setActiveFilters([]);
     setCollapsedProviders(Object.fromEntries(enabledProviders.map((provider) => [provider.id, true])));
@@ -204,13 +200,9 @@ export default function ChatModelPicker({
     });
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [enabledProviders, open]);
+  }, [enabledProviders]);
 
   useEffect(() => {
-    if (!open) {
-      return;
-    }
-
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -220,11 +212,7 @@ export default function ChatModelPicker({
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, open]);
-
-  if (!open) {
-    return null;
-  }
+  }, [onClose]);
 
   return (
     <div className="chat-model-picker-backdrop" onClick={onClose}>
@@ -287,6 +275,7 @@ export default function ChatModelPicker({
           {providerSections.length ? (
             providerSections.map((section) => {
               const providerIsExpanded = hasActiveQuery || hasActiveFilters || !collapsedProviders[section.provider.id];
+              const groupedCards = providerIsExpanded ? groupModels(section.visibleCards) : [];
               const providerStyle = { '--provider-accent': section.meta.accent } as CSSProperties;
 
               return (
@@ -320,8 +309,9 @@ export default function ChatModelPicker({
                   </button>
 
                   <div className="chat-model-picker-provider-body-wrap">
+                    {providerIsExpanded ? (
                     <div className="chat-model-picker-provider-body">
-                      {section.groupedCards.map(([groupName, cards]) => (
+                      {groupedCards.map(([groupName, cards]) => (
                         <div key={`${section.provider.id}-${groupName}`} className="chat-model-picker-family">
                           <div className="chat-model-picker-family-label">{groupName}</div>
                           <div className="chat-model-picker-family-list">
@@ -335,7 +325,15 @@ export default function ChatModelPicker({
                                   key={`${section.provider.id}-${modelId}`}
                                   type="button"
                                   className={`chat-model-picker-model-row${active ? ' active' : ''}`}
-                                  onClick={() => onSelectModel(section.provider.id, model)}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onMouseDown={(event) => {
+                                    if (event.button !== 0) {
+                                      return;
+                                    }
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    onSelectModel(section.provider.id, model);
+                                  }}
                                 >
                                   <span className="settings-provider-model-logo">
                                     {logo ? <img src={logo} alt="" /> : <span>{getProviderModelInitial(model)}</span>}
@@ -365,6 +363,7 @@ export default function ChatModelPicker({
                         </div>
                       ))}
                     </div>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -379,4 +378,12 @@ export default function ChatModelPicker({
       </section>
     </div>
   );
+}
+
+export default function ChatModelPicker(props: ChatModelPickerProps) {
+  if (!props.open) {
+    return null;
+  }
+
+  return <ChatModelPickerDialog {...props} />;
 }

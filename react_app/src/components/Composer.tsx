@@ -57,11 +57,17 @@ export default function Composer({
   reasoningOptions,
   textareaRef,
 }: ComposerProps) {
-  const controlsDisabled = disabled || isSending;
+  const composerLocked = disabled || isSending;
+  const pickerControlsDisabled = disabled;
+  const commitDropdownOption = (event: MouseEvent<HTMLDivElement>, commit: () => void) => {
+    event.preventDefault();
+    event.stopPropagation();
+    commit();
+  };
 
   return (
     <div className="input-wrapper">
-      <input hidden disabled={controlsDisabled} multiple onChange={onAttachmentInputChange} ref={fileInputRef} type="file" />
+      <input hidden disabled={composerLocked} multiple onChange={onAttachmentInputChange} ref={fileInputRef} type="file" />
 
       {attachments.length > 0 ? (
         <div className="composer-attachment-strip">
@@ -76,7 +82,7 @@ export default function Composer({
               </div>
               <button
                 className="composer-attachment-remove"
-                disabled={controlsDisabled}
+                disabled={composerLocked}
                 onClick={() => attachment.id && onRemoveAttachment(attachment.id)}
                 type="button"
               >
@@ -89,7 +95,7 @@ export default function Composer({
 
       <textarea
         className="chat-input"
-        disabled={controlsDisabled}
+        disabled={composerLocked}
         id="chat-input"
         onChange={onChange}
         onKeyDown={onKeyDown}
@@ -101,7 +107,7 @@ export default function Composer({
 
       <div className="input-toolbar">
         <div className="toolbar-left">
-          <button className="tool-btn-circle" disabled={controlsDisabled} type="button" onClick={onComposerPlus}>
+          <button className="tool-btn-circle" disabled={composerLocked} type="button" onClick={onComposerPlus}>
             <i className="ph-light ph-plus" />
           </button>
 
@@ -112,7 +118,7 @@ export default function Composer({
                 <i className="ph-light ph-caret-down" />
               </>
             }
-            disabled={controlsDisabled}
+            disabled={pickerControlsDisabled}
             isOpen={dropdownId === 'permission'}
             onToggle={(event) => onToggleDropdown('permission', event)}
           >
@@ -120,7 +126,7 @@ export default function Composer({
               <div
                 className={`dropdown-item ${option.value === currentPermission.value ? 'selected' : ''}`}
                 key={option.value}
-                onClick={() => onPermissionSelect(option)}
+                onMouseDown={(event) => commitDropdownOption(event, () => onPermissionSelect(option))}
               >
                 <div className="dropdown-item-left">
                   <i className={`ph-light ${option.icon} menu-icon`} />
@@ -135,9 +141,17 @@ export default function Composer({
         <div className="toolbar-right">
           <button
             className="tool-btn-capsule chat-model-picker-trigger"
-            disabled={controlsDisabled}
+            disabled={pickerControlsDisabled}
             type="button"
-            onClick={onOpenModelPicker}
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => {
+              if (event.button !== 0) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenModelPicker();
+            }}
           >
             <span>{currentModel}</span> <i className="ph-light ph-caret-down" />
           </button>
@@ -149,7 +163,7 @@ export default function Composer({
                 <span>{currentReasoningLabel}</span> <i className="ph-light ph-caret-down" />
               </>
             }
-            disabled={controlsDisabled}
+            disabled={pickerControlsDisabled}
             isOpen={dropdownId === 'intensity'}
             onToggle={(event) => onToggleDropdown('intensity', event)}
           >
@@ -157,7 +171,7 @@ export default function Composer({
               <div
                 className={`dropdown-item ${option.value === currentReasoningValue ? 'selected' : ''}`}
                 key={option.value}
-                onClick={() => onReasoningSelect(option)}
+                onMouseDown={(event) => commitDropdownOption(event, () => onReasoningSelect(option))}
               >
                 <div className="dropdown-item-left">{option.label}</div>
                 <i className="ph-light ph-check check-icon" />

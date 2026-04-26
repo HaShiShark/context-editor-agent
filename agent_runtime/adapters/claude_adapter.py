@@ -6,7 +6,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_runtime.adapters.base import BaseAdapter, ProviderRequestContext, ToolSpec
+from agent_runtime.adapters.base import (
+    BaseAdapter,
+    ProviderRequestContext,
+    ToolSpec,
+    reasoning_effort_token_budget,
+)
 from agent_runtime.core.stream_events import (
     AdapterStreamEvent,
     ProviderDoneEvent,
@@ -498,11 +503,7 @@ def _thinking_config(
             "display": "summarized",
         }
 
-    effort_budget = {
-        "low": 1024,
-        "medium": 4096,
-        "high": 8192,
-    }.get(reasoning_effort or "")
+    effort_budget = reasoning_effort_token_budget(reasoning_effort)
     if effort_budget is None:
         return None
     return {

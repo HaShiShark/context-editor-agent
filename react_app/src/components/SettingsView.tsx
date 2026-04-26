@@ -552,7 +552,15 @@ export default function SettingsView({
     <button
       type="button"
       className={className}
-      onClick={() => setSettingsModelPickerOpen(true)}
+      onClick={(event) => event.stopPropagation()}
+      onMouseDown={(event) => {
+        if (event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setSettingsModelPickerOpen(true);
+      }}
       aria-label="选择聊天模型"
     >
       <span>{settingsModelLabel}</span>

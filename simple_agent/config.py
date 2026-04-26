@@ -66,6 +66,8 @@ DEFAULT_RESPONSE_PROVIDERS: tuple[dict[str, object], ...] = (
 PROVIDER_IDS = {str(spec["id"]) for spec in DEFAULT_RESPONSE_PROVIDERS}
 LEGACY_DEFAULT_PROVIDER_IDS = {"openrouter", "newapi", "siliconflow", "lmstudio"}
 PROVIDER_TYPES = {"chat_completion", "responses", "gemini", "claude"}
+REASONING_EFFORTS = {"default", "none", "low", "medium", "high"}
+DEFAULT_REASONING_EFFORT = "default"
 DEFAULT_CONTEXT_TOKEN_WARNING_THRESHOLD = 5000
 DEFAULT_CONTEXT_TOKEN_CRITICAL_THRESHOLD = 10000
 DEFAULT_ASSISTANT_NAME = "Hanako"
@@ -229,6 +231,11 @@ def _normalize_theme_mode(value: Any, fallback: str = DEFAULT_THEME_MODE) -> str
     return cleaned if cleaned in {"light", "dark", "system"} else fallback
 
 
+def _normalize_reasoning_effort(value: Any) -> str:
+    cleaned = _clean_string(value)
+    return cleaned if cleaned in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
+
+
 def _normalize_context_token_thresholds(
     warning_threshold: Any,
     critical_threshold: Any,
@@ -296,7 +303,7 @@ def _normalize_provider_records(
                 continue
 
             provider_id = _clean_string(item.get("id"))
-            if provider_id and provider_id not in LEGACY_DEFAULT_PROVIDER_IDS:
+            if provider_id:
                 raw_by_id[provider_id] = item
 
     normalized_records: list[dict[str, Any]] = []
@@ -446,6 +453,7 @@ def _public_provider_payload(record: dict[str, Any]) -> dict[str, object]:
 @dataclass(slots=True)
 class Settings:
     model: str
+    default_reasoning_effort: str
     context_workbench_model: str
     context_workbench_provider_id: str
     project_root: Path
@@ -494,6 +502,7 @@ class Settings:
     def public_payload(self) -> dict[str, object]:
         return {
             "default_model": self.model,
+            "default_reasoning_effort": self.default_reasoning_effort,
             "context_workbench_model": self.context_workbench_model,
             "context_workbench_provider_id": self.context_workbench_provider_id,
             "context_token_warning_threshold": self.context_token_warning_threshold,
@@ -547,6 +556,7 @@ def load_settings() -> Settings:
         or _clean_string(os.getenv("OPENAI_MODEL"))
         or "gpt-5.4-mini"
     )
+    default_reasoning_effort = _normalize_reasoning_effort(stored.get("default_reasoning_effort"))
     context_workbench_model = _clean_string(stored.get("context_workbench_model")) or model
     context_token_warning_threshold, context_token_critical_threshold = _normalize_context_token_thresholds(
         stored.get("context_token_warning_threshold"),
@@ -633,6 +643,7 @@ def load_settings() -> Settings:
 
     return Settings(
         model=model,
+        default_reasoning_effort=default_reasoning_effort,
         context_workbench_model=context_workbench_model,
         context_workbench_provider_id=context_workbench_provider_id,
         project_root=project_root,
@@ -670,6 +681,7 @@ def load_settings() -> Settings:
 def save_settings(
     *,
     default_model: str | None = None,
+    default_reasoning_effort: str | None = None,
     context_workbench_model: str | None = None,
     context_workbench_provider_id: str | None = None,
     context_token_warning_threshold: int | None = None,
@@ -730,7 +742,7 @@ def save_settings(
             if not isinstance(item, dict):
                 continue
             provider_id = _clean_string(item.get("id"))
-            if provider_id and provider_id not in LEGACY_DEFAULT_PROVIDER_IDS:
+            if provider_id:
                 incoming_by_id[provider_id] = item
 
         for provider_id, incoming in incoming_by_id.items():
@@ -840,6 +852,11 @@ def save_settings(
     current["active_provider_id"] = next_active_provider_id
     current["response_providers"] = ordered_records
     current["model"] = _clean_string(active_provider.get("default_model")) or loaded.model
+
+    if default_reasoning_effort is not None:
+        current["default_reasoning_effort"] = _normalize_reasoning_effort(default_reasoning_effort)
+    elif "default_reasoning_effort" not in current:
+        current["default_reasoning_effort"] = loaded.default_reasoning_effort
 
     next_context_workbench_model = _clean_string(current.get("context_workbench_model")) or loaded.context_workbench_model
     if context_workbench_model is not None:

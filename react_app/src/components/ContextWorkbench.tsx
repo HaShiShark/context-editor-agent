@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, KeyboardEvent } from 'react';
+import type { ChangeEvent, KeyboardEvent, MouseEvent } from 'react';
+import { flushSync } from 'react-dom';
 
 import {
   cancelActiveRequest,
@@ -406,6 +407,7 @@ export default function ContextWorkbench({
   const manualHistoryKey = useMemo(() => JSON.stringify(history || []), [history]);
   const isWorkbenchBusy = isManualSending || isRestoreBusy;
   const isManualComposerLocked = isMainChatBusy || isWorkbenchBusy;
+  const manualReasoningDisabled = reasoningOptions.length === 0;
   const isRestoreLocked = isMainChatBusy || isRestoreBusy;
   const hasClearableManualHistory = manualMessages.some((message) => !message.pending);
   const currentManualReasoningLabel = getReasoningLabel(manualReasoning, reasoningOptions);
@@ -577,6 +579,15 @@ export default function ContextWorkbench({
     setManualMessages((previous) =>
       previous.map((item) => (item.id === messageId ? updater(item) : item)),
     );
+  }
+
+  function handleManualReasoningSelect(event: MouseEvent<HTMLDivElement>, option: ReasoningOption) {
+    event.preventDefault();
+    event.stopPropagation();
+    flushSync(() => {
+      setManualReasoning(option.value);
+      setIsManualReasoningOpen(false);
+    });
   }
 
   async function handleSaveWorkbenchSettings() {
@@ -1070,7 +1081,7 @@ export default function ContextWorkbench({
                           <i className="ph-light ph-caret-down" />
                         </>
                       }
-                      disabled={isManualComposerLocked}
+                      disabled={manualReasoningDisabled}
                       isOpen={isManualReasoningOpen}
                       onToggle={(event) => {
                         event.stopPropagation();
@@ -1081,10 +1092,7 @@ export default function ContextWorkbench({
                         <div
                           className={`dropdown-item ${option.value === manualReasoning ? 'selected' : ''}`}
                           key={option.value}
-                          onClick={() => {
-                            setManualReasoning(option.value);
-                            setIsManualReasoningOpen(false);
-                          }}
+                          onMouseDown={(event) => handleManualReasoningSelect(event, option)}
                         >
                           <div className="dropdown-item-left">{option.label}</div>
                           <i className="ph-light ph-check check-icon" />
@@ -1212,9 +1220,15 @@ export default function ContextWorkbench({
                 <div className="workbench-setting-control-row">
                   <button
                     className="tool-btn-capsule chat-model-picker-trigger workbench-model-picker-trigger"
-                    disabled={isSettingsLoading || isSettingsSaving}
+                    disabled={isSettingsLoading}
                     type="button"
-                    onClick={() => {
+                    onClick={(event) => event.stopPropagation()}
+                    onMouseDown={(event) => {
+                      if (event.button !== 0) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.stopPropagation();
                       setIsModelPickerOpen(true);
                       setSettingsMessage('');
                       setSettingsError('');

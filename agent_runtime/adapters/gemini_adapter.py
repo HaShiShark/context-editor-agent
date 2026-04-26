@@ -6,7 +6,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from agent_runtime.adapters.base import BaseAdapter, ProviderRequestContext, ToolSpec
+from agent_runtime.adapters.base import (
+    BaseAdapter,
+    ProviderRequestContext,
+    ToolSpec,
+    reasoning_effort_token_budget,
+)
 from agent_runtime.core.canonical_types import CanonicalItem
 from agent_runtime.core.stream_events import (
     AdapterStreamEvent,
@@ -78,11 +83,7 @@ class GeminiAdapter(BaseAdapter[dict[str, Any]]):
         if context.reasoning_effort or thinking_config:
             thinking_config["includeThoughts"] = True
             if "thinkingBudget" not in thinking_config:
-                effort_budget = {
-                    "low": 1024,
-                    "medium": 4096,
-                    "high": 8192,
-                }.get(context.reasoning_effort or "")
+                effort_budget = reasoning_effort_token_budget(context.reasoning_effort)
                 if effort_budget is not None:
                     thinking_config["thinkingBudget"] = effort_budget
             next_generation_config["thinkingConfig"] = thinking_config

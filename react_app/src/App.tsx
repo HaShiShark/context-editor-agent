@@ -1,5 +1,6 @@
 import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, MouseEvent as ReactMouseEvent } from 'react';
+import { flushSync } from 'react-dom';
 
 import {
   archiveProjectSessionsRequest,
@@ -338,6 +339,18 @@ function normalizeHexColorSetting(value: unknown, fallback: string) {
   return isHexColorValue(value) ? value : fallback;
 }
 
+function normalizeReasoningEffortSetting(value: unknown) {
+  return typeof value === 'string' && ['default', 'none', 'low', 'medium', 'high'].includes(value)
+    ? value
+    : DEFAULT_SETTINGS.default_reasoning_effort;
+}
+
+function resolveReasoningEffort(value: string, options: ReasoningOption[]) {
+  return options.some((option) => option.value === value)
+    ? value
+    : options.find((option) => option.value === 'default')?.value || options[0]?.value || DEFAULT_SETTINGS.default_reasoning_effort;
+}
+
 function normalizeSettingsPayload(rawSettings: Partial<OpenAISettings> | undefined): OpenAISettings {
   const nextSettings = rawSettings || {};
 
@@ -345,6 +358,7 @@ function normalizeSettingsPayload(rawSettings: Partial<OpenAISettings> | undefin
     default_model: typeof nextSettings.default_model === 'string' && nextSettings.default_model
       ? nextSettings.default_model
       : DEFAULT_SETTINGS.default_model,
+    default_reasoning_effort: normalizeReasoningEffortSetting(nextSettings.default_reasoning_effort),
     context_workbench_model: typeof nextSettings.context_workbench_model === 'string' && nextSettings.context_workbench_model
       ? nextSettings.context_workbench_model
       : DEFAULT_SETTINGS.context_workbench_model,
@@ -440,6 +454,7 @@ function normalizeToolSettings(rawTools: unknown): ToolSetting[] {
 
 const DEFAULT_SETTINGS: OpenAISettings = {
   default_model: 'gpt-5.4-mini',
+  default_reasoning_effort: 'default',
   context_workbench_model: 'gpt-5.4-mini',
   context_workbench_provider_id: 'openai',
   context_token_warning_threshold: 5000,
@@ -646,6 +661,7 @@ function buildSettingsSavePayload(
   options: {
     activeProviderId?: string;
     clearProviderApiKeyId?: string;
+    defaultReasoningEffort?: string;
     uiPreferences?: PersistedUiPreferences;
   } = {},
 ) {
@@ -654,6 +670,9 @@ function buildSettingsSavePayload(
 
   return {
     default_model: effectiveActiveProvider?.default_model || draft.default_model,
+    ...(options.defaultReasoningEffort !== undefined
+      ? { default_reasoning_effort: options.defaultReasoningEffort }
+      : {}),
     openai_base_url: (effectiveActiveProvider?.api_base_url || draft.openai_base_url).trim(),
     max_tool_rounds: draft.max_tool_rounds,
     assistant_name: draft.assistant_name,
@@ -1212,7 +1231,6 @@ export default function App() {
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [runningSessionIds, setRunningSessionIds] = useState<Record<string, boolean>>({});
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
-  const [isModelSwitching, setIsModelSwitching] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<DropdownId>(null);
   const [currentPermission, setCurrentPermission] = useState<PermissionOption>(PERMISSION_OPTIONS[1]);
   const [serviceHintsEnabled, setServiceHintsEnabled] = useState(true);
@@ -1259,6 +1277,10 @@ export default function App() {
   const settingsInitializedRef = useRef(false);
   const settingsAutosaveTimerRef = useRef<number | null>(null);
   const settingsAutosaveSnapshotRef = useRef('');
+  const currentModelRef = useRef(currentModel);
+  const modelSelectionRequestIdRef = useRef(0);
+  const currentReasoningRef = useRef(currentReasoning);
+  const reasoningSaveRequestIdRef = useRef(0);
   const currentSessionIdRef = useRef(currentSessionId);
   const currentProjectIdRef = useRef(currentProjectId);
   const streamAbortControllersRef = useRef<Record<string, AbortController>>({});
@@ -1297,6 +1319,14 @@ export default function App() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    currentModelRef.current = currentModel;
+  }, [currentModel]);
+
+  useEffect(() => {
+    currentReasoningRef.current = currentReasoning;
+  }, [currentReasoning]);
 
   useEffect(() => localizeAppDom(document.body, uiLocale), [uiLocale]);
 
@@ -1510,18 +1540,51 @@ export default function App() {
     };
   }
 
-  function syncSettingsState(nextSettings: OpenAISettings, nextModels?: string[]) {
+  function syncSettingsState(
+    nextSettings: OpenAISettings,
+    nextModels?: string[],
+    options: {
+      preserveCurrentModel?: boolean;
+      preserveCurrentReasoning?: boolean;
+    } = {},
+  ) {
+    const preserveCurrentModel = options.preserveCurrentModel ?? false;
+    const preserveCurrentReasoning = options.preserveCurrentReasoning ?? false;
     const normalizedSettings = normalizeSettingsPayload(nextSettings);
     const availableModels = Array.isArray(nextModels) && nextModels.length
       ? nextModels
       : model_options_fallback(normalizedSettings.default_model);
-    const nextDraft = toSettingsDraft(normalizedSettings);
+    let nextDraft = toSettingsDraft(normalizedSettings);
+    if (preserveCurrentModel && currentModelRef.current.trim()) {
+      const currentModelId = currentModelRef.current.trim();
+      const previousActiveProviderId = settingsDraftRef.current.active_provider_id;
+      const providerForCurrentModel =
+        nextDraft.response_providers.find(
+          (provider) =>
+            provider.id === previousActiveProviderId &&
+            provider.models.some((model) => (model.id || model.label || '').trim() === currentModelId),
+        ) ||
+        nextDraft.response_providers.find((provider) =>
+          provider.models.some((model) => (model.id || model.label || '').trim() === currentModelId),
+        ) ||
+        nextDraft.response_providers.find((provider) => provider.id === previousActiveProviderId);
+
+      nextDraft = providerForCurrentModel
+        ? applyProviderModelSelection(nextDraft, providerForCurrentModel.id, currentModelId)
+        : {
+            ...nextDraft,
+            default_model: currentModelId,
+          };
+    }
     const nextPreferences = uiPreferencesFromSettings(normalizedSettings);
 
     setOpenAISettings(normalizedSettings);
     settingsDraftRef.current = nextDraft;
     settingsAutosaveSnapshotRef.current = settingsPayloadSnapshot(
-      buildSettingsSavePayload(nextDraft, { uiPreferences: nextPreferences }),
+      buildSettingsSavePayload(nextDraft, {
+        defaultReasoningEffort: normalizedSettings.default_reasoning_effort,
+        uiPreferences: nextPreferences,
+      }),
     );
     settingsInitializedRef.current = true;
     setSettingsDraft(nextDraft);
@@ -1535,10 +1598,21 @@ export default function App() {
     setCodeFontSize(nextPreferences.code_font_size);
     setAppearanceContrast(nextPreferences.appearance_contrast);
     setModels((previous) => {
-      const merged = [...availableModels, ...previous].filter(Boolean);
+      const merged = [currentModelRef.current, ...availableModels, ...previous].filter(Boolean);
       return Array.from(new Set(merged));
     });
-    setCurrentModel(normalizedSettings.default_model || availableModels[0] || 'gpt-5.4-mini');
+    const nextCurrentModel = preserveCurrentModel && currentModelRef.current
+      ? currentModelRef.current
+      : normalizedSettings.default_model || availableModels[0] || 'gpt-5.4-mini';
+    currentModelRef.current = nextCurrentModel;
+    setCurrentModel(nextCurrentModel);
+    setCurrentReasoning((previous) => {
+      const nextReasoning = preserveCurrentReasoning
+        ? currentReasoningRef.current || previous
+        : resolveReasoningEffort(normalizedSettings.default_reasoning_effort || previous, reasoningOptions);
+      currentReasoningRef.current = nextReasoning;
+      return nextReasoning;
+    });
   }
 
   function updateSettingsDraftState(updater: (previous: SettingsDraft) => SettingsDraft) {
@@ -1594,7 +1668,10 @@ export default function App() {
     setSavingProviderId(providerId);
     try {
       const response = await saveSettingsRequest({
-        ...buildSettingsSavePayload(nextDraft, { uiPreferences: currentUiPreferences() }),
+        ...buildSettingsSavePayload(nextDraft, {
+          defaultReasoningEffort: currentReasoningRef.current,
+          uiPreferences: currentUiPreferences(),
+        }),
         deleted_provider_ids: [providerId],
       });
       syncSettingsState(response.settings, response.models);
@@ -1658,6 +1735,7 @@ export default function App() {
         buildSettingsSavePayload(settingsDraftRef.current, {
           activeProviderId: options.activate ? providerId : undefined,
           clearProviderApiKeyId: options.clearApiKey ? providerId : undefined,
+          defaultReasoningEffort: currentReasoningRef.current,
           uiPreferences: currentUiPreferences(),
         }),
       );
@@ -1723,16 +1801,25 @@ export default function App() {
         );
         const nextSettingsDraft = toSettingsDraft(nextSettings);
         const nextPreferences = uiPreferencesFromSettings(nextSettings);
-        settingsAutosaveSnapshotRef.current = settingsPayloadSnapshot(
-          buildSettingsSavePayload(nextSettingsDraft, { uiPreferences: nextPreferences }),
+        const nextCurrentReasoning = resolveReasoningEffort(
+          nextSettings.default_reasoning_effort || preferredReasoning,
+          nextReasoningOptions,
         );
+        settingsAutosaveSnapshotRef.current = settingsPayloadSnapshot(
+          buildSettingsSavePayload(nextSettingsDraft, {
+            defaultReasoningEffort: nextSettings.default_reasoning_effort,
+            uiPreferences: nextPreferences,
+          }),
+        );
+        currentModelRef.current = nextModel;
+        currentReasoningRef.current = nextCurrentReasoning;
 
         startTransition(() => {
           setProjectName(initData.project_name || 'hashcode');
           setModels(nextModels.length ? nextModels : [nextModel]);
           setCurrentModel(nextModel);
           setReasoningOptions(nextReasoningOptions);
-          setCurrentReasoning(preferredReasoning);
+          setCurrentReasoning(nextCurrentReasoning);
           setConversations(nextConversations);
           setContextWorkbenchHistories(nextWorkbenchHistories);
           setContextRevisionHistories(nextRevisionHistories);
@@ -1776,6 +1863,7 @@ export default function App() {
     }
 
     const payload = buildSettingsSavePayload(settingsDraft, {
+      defaultReasoningEffort: currentReasoningRef.current,
       uiPreferences: currentUiPreferences(),
     });
     const snapshot = settingsPayloadSnapshot(payload);
@@ -2685,7 +2773,10 @@ export default function App() {
     setIsSavingSettings(true);
     try {
       const response = await saveSettingsRequest(
-        buildSettingsSavePayload(settingsDraftRef.current, { uiPreferences: currentUiPreferences() }),
+        buildSettingsSavePayload(settingsDraftRef.current, {
+          defaultReasoningEffort: currentReasoningRef.current,
+          uiPreferences: currentUiPreferences(),
+        }),
       );
 
       syncSettingsState(response.settings, response.models);
@@ -2703,6 +2794,7 @@ export default function App() {
       const response = await saveSettingsRequest({
         ...buildSettingsSavePayload(settingsDraftRef.current, {
           clearProviderApiKeyId: settingsDraftRef.current.active_provider_id,
+          defaultReasoningEffort: currentReasoningRef.current,
           uiPreferences: currentUiPreferences(),
         }),
         clear_api_key: true,
@@ -2848,7 +2940,10 @@ export default function App() {
     }
   }
 
-  function handleToggleDropdown(dropdownId: Exclude<DropdownId, null>, event: ReactMouseEvent<HTMLButtonElement>) {
+  function handleToggleDropdown(
+    dropdownId: Exclude<DropdownId, null>,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) {
     event.stopPropagation();
     setOpenDropdown((previous) => (previous === dropdownId ? null : dropdownId));
   }
@@ -2860,14 +2955,11 @@ export default function App() {
   }
 
   function handleOpenModelPicker() {
-    if (isModelSwitching) {
-      return;
-    }
     setOpenDropdown(null);
     setIsModelPickerOpen(true);
   }
 
-  async function handleModelSelect(providerId: string, model: ResponseProviderModel) {
+  function handleModelSelect(providerId: string, model: ResponseProviderModel) {
     const modelId = (model.id || model.label || '').trim();
     if (!modelId) {
       return;
@@ -2884,38 +2976,95 @@ export default function App() {
       return;
     }
 
+    const requestId = modelSelectionRequestIdRef.current + 1;
+    modelSelectionRequestIdRef.current = requestId;
     const nextDraft = applyProviderModelSelection(previousDraft, providerId, modelId);
-    settingsDraftRef.current = nextDraft;
-    setSettingsDraft(nextDraft);
-    setCurrentModel(modelId);
-    setModels((previous) => Array.from(new Set([modelId, ...targetProvider.models.map((item) => item.id), ...previous].filter(Boolean))));
-    setIsModelPickerOpen(false);
-    setIsModelSwitching(true);
+    const savePayload = buildSettingsSavePayload(nextDraft, {
+      activeProviderId: providerId,
+      defaultReasoningEffort: currentReasoningRef.current,
+      uiPreferences: currentUiPreferences(),
+    });
 
-    try {
-      const response = await saveSettingsRequest(
-        buildSettingsSavePayload(nextDraft, {
-          activeProviderId: providerId,
-          uiPreferences: currentUiPreferences(),
-        }),
-      );
-      syncSettingsState(response.settings, response.models);
-      showToast(`模型已切换到 ${modelId}。`);
-    } catch (error) {
-      const previousActiveProvider = previousDraft.response_providers.find((provider) => provider.id === previousDraft.active_provider_id);
-      settingsDraftRef.current = previousDraft;
-      setSettingsDraft(previousDraft);
-      setCurrentModel(previousActiveProvider?.default_model || previousDraft.default_model || currentModel);
-      showToast(getThrownMessage(error));
-    } finally {
-      setIsModelSwitching(false);
+    if (settingsAutosaveTimerRef.current) {
+      window.clearTimeout(settingsAutosaveTimerRef.current);
+      settingsAutosaveTimerRef.current = null;
     }
+
+    flushSync(() => {
+      currentModelRef.current = modelId;
+      settingsDraftRef.current = nextDraft;
+      settingsAutosaveSnapshotRef.current = settingsPayloadSnapshot(savePayload);
+      setCurrentModel(modelId);
+      setSettingsDraft(nextDraft);
+      setIsModelPickerOpen(false);
+      setModels((previous) =>
+        Array.from(new Set([modelId, ...targetProvider.models.map((item) => item.id), ...previous].filter(Boolean))),
+      );
+    });
+    showToast(`模型已切换到 ${modelId}。`);
+    void saveSettingsRequest(savePayload)
+      .then((response) => {
+        if (modelSelectionRequestIdRef.current !== requestId) {
+          return;
+        }
+        syncSettingsState(response.settings, response.models, {
+          preserveCurrentModel: true,
+          preserveCurrentReasoning: true,
+        });
+      })
+      .catch((error) => {
+        if (modelSelectionRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const previousActiveProvider = previousDraft.response_providers.find((provider) => provider.id === previousDraft.active_provider_id);
+        const previousModel = previousActiveProvider?.default_model || previousDraft.default_model || currentModelRef.current;
+        const previousPayload = buildSettingsSavePayload(previousDraft, {
+          defaultReasoningEffort: currentReasoningRef.current,
+          uiPreferences: currentUiPreferences(),
+        });
+        settingsDraftRef.current = previousDraft;
+        settingsAutosaveSnapshotRef.current = settingsPayloadSnapshot(previousPayload);
+        currentModelRef.current = previousModel;
+        setSettingsDraft(previousDraft);
+        setCurrentModel(previousModel);
+        showToast(getThrownMessage(error));
+      });
   }
 
   function handleReasoningSelect(option: ReasoningOption) {
-    setCurrentReasoning(option.value);
-    setOpenDropdown(null);
+    const requestId = reasoningSaveRequestIdRef.current + 1;
+    reasoningSaveRequestIdRef.current = requestId;
+    const previousReasoning = currentReasoningRef.current;
+    flushSync(() => {
+      currentReasoningRef.current = option.value;
+      setCurrentReasoning(option.value);
+      setOpenDropdown(null);
+    });
     showToast(`推理强度已切换到 ${option.label}。`);
+    void saveSettingsRequest(
+      buildSettingsSavePayload(settingsDraftRef.current, {
+        defaultReasoningEffort: option.value,
+        uiPreferences: currentUiPreferences(),
+      }),
+    )
+      .then((response) => {
+        if (reasoningSaveRequestIdRef.current !== requestId) {
+          return;
+        }
+        syncSettingsState(response.settings, response.models, {
+          preserveCurrentModel: true,
+          preserveCurrentReasoning: true,
+        });
+      })
+      .catch((error) => {
+        if (reasoningSaveRequestIdRef.current !== requestId) {
+          return;
+        }
+        currentReasoningRef.current = previousReasoning;
+        setCurrentReasoning(previousReasoning);
+        showToast(getThrownMessage(error));
+      });
   }
 
   function handleToggleSidebar() {
@@ -3125,7 +3274,6 @@ export default function App() {
                 currentPermission={currentPermission}
                 currentReasoningLabel={currentReasoningLabel}
                 currentReasoningValue={currentReasoning}
-                disabled={isModelSwitching}
                 dropdownId={openDropdown}
                 fileInputRef={fileInputRef}
                 hasMessages={hasMessages}
@@ -3170,11 +3318,7 @@ export default function App() {
               currentModel={currentModel}
               open={isModelPickerOpen}
               providers={settingsDraft.response_providers}
-              onClose={() => {
-                if (!isModelSwitching) {
-                  setIsModelPickerOpen(false);
-                }
-              }}
+              onClose={() => setIsModelPickerOpen(false)}
               onSelectModel={handleModelSelect}
             />
 

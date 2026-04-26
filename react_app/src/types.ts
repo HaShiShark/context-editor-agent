@@ -120,6 +120,7 @@ export interface ReasoningOption {
 
 export interface OpenAISettings {
   default_model: string;
+  default_reasoning_effort: string;
   context_workbench_model: string;
   context_workbench_provider_id: string;
   context_token_warning_threshold: number;
