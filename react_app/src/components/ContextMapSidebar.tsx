@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -218,7 +219,49 @@ export default function ContextMapSidebar({
   const [nodeLayouts, setNodeLayouts] = useState<NodeLayout[]>([]);
   const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>(DEFAULT_SCROLL_METRICS);
   const [tokenThresholds, setTokenThresholds] = useState<ContextTokenThresholds>(DEFAULT_CONTEXT_TOKEN_THRESHOLDS);
-  const showMinimap = stage === 2;
+  const [visibleStage, setVisibleStage] = useState<0 | 1 | 2>(0);
+  const mountedRef = useRef(false);
+  const mountAnimFrameRef = useRef<number | null>(null);
+
+  // animate-in on mount: render as stage-0 first frame, then jump to real stage so CSS transition fires
+  useEffect(() => {
+    if (stage === 0) {
+      setVisibleStage(0);
+      return () => {
+        if (mountAnimFrameRef.current !== null) cancelAnimationFrame(mountAnimFrameRef.current);
+      };
+    }
+    if (!mountedRef.current) {
+      // Fresh mount — animate from stage-0 to target
+      mountedRef.current = true;
+      mountAnimFrameRef.current = requestAnimationFrame(() => {
+        mountAnimFrameRef.current = requestAnimationFrame(() => {
+          setVisibleStage(stage);
+        });
+      });
+      return () => {
+        if (mountAnimFrameRef.current !== null) cancelAnimationFrame(mountAnimFrameRef.current);
+      };
+    }
+    // Follow stage changes immediately (1↔2)
+    setVisibleStage(stage);
+  }, [stage]);
+
+  const effectiveStage = stage === 0 ? 0 : visibleStage;
+  const showMinimap = effectiveStage === 2;
+
+  const tokenThresholdsRef = useRef<ContextTokenThresholds>(tokenThresholds);
+  tokenThresholdsRef.current = tokenThresholds;
+
+  const setTokenThresholdsSafe = useCallback((nextThresholds: ContextTokenThresholds) => {
+    if (
+      nextThresholds.warningThreshold === tokenThresholdsRef.current.warningThreshold &&
+      nextThresholds.criticalThreshold === tokenThresholdsRef.current.criticalThreshold
+    ) {
+      return;
+    }
+    setTokenThresholds(nextThresholds);
+  }, []);
 
   const messageStatBase = useMemo<MessageStatBase[]>(() => {
     let editableNodeCursor = 0;
@@ -464,12 +507,6 @@ export default function ContextMapSidebar({
       resizeObserver.observe(scrollRef.current);
     }
 
-    nodeRefs.current.forEach((node) => {
-      if (node && resizeObserver) {
-        resizeObserver.observe(node);
-      }
-    });
-
     window.addEventListener('resize', measureNodes);
 
     return () => {
@@ -526,16 +563,32 @@ export default function ContextMapSidebar({
     minimapScroller.scrollTop = desiredScrollTop;
   }, [minimapContentHeightPx, minimapViewportTopPx, showMinimap, messages.length]);
 
-  useEffect(() => {
-    function handleWindowMouseMove(event: MouseEvent) {
+  const handlersRef = useRef<{
+    handleWindowMouseMove: (event: MouseEvent) => void;
+    handleWindowMouseUp: () => void;
+  }>({
+    handleWindowMouseMove: () => {},
+    handleWindowMouseUp: () => {},
+  });
+
+  handlersRef.current = {
+    handleWindowMouseMove(event: MouseEvent) {
       syncScrollFromMinimap(event.clientY);
       updateDraggedSelection(event.clientY);
       ensureSelectionAutoScroll();
-    }
-
-    function handleWindowMouseUp() {
+    },
+    handleWindowMouseUp() {
       minimapDragRef.current = null;
       finishSelectionDrag();
+    },
+  };
+
+  useEffect(() => {
+    function handleWindowMouseMove(event: MouseEvent) {
+      handlersRef.current.handleWindowMouseMove(event);
+    }
+    function handleWindowMouseUp() {
+      handlersRef.current.handleWindowMouseUp();
     }
 
     window.addEventListener('mousemove', handleWindowMouseMove);
@@ -545,7 +598,7 @@ export default function ContextMapSidebar({
       window.removeEventListener('mousemove', handleWindowMouseMove);
       window.removeEventListener('mouseup', handleWindowMouseUp);
     };
-  });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -886,7 +939,7 @@ export default function ContextMapSidebar({
   );
 
   return (
-    <aside className={`right-panel stage-${stage}`}>
+    <aside className={`right-panel stage-${effectiveStage}`}>
       <div className="context-map-pane">
         <div className="context-map-header">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1073,7 +1126,7 @@ export default function ContextMapSidebar({
             onRevisionHistoryChange={onContextRevisionHistoryChange}
             onPendingRestoreChange={onPendingContextRestoreChange}
             onEnsureSession={onEnsureSession}
-            onTokenThresholdsChange={setTokenThresholds}
+            onTokenThresholdsChange={setTokenThresholdsSafe}
           />
         ) : null}
       </div>

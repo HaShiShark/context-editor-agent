@@ -1311,6 +1311,44 @@ export default function App() {
     mode: 'condensed',
     width: 320,
   });
+  const contextMapVisibleRef = useRef(false);
+  const contextMapUnmountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevContextMapStageRef = useRef(contextMap.stage);
+
+  // Track visibility with delayed unmount: keep mounted during exit animation then unmount.
+  // This prevents the Chromium renderer crash caused by re-showing a CSS-transform-hidden
+  // complex layout, while preserving the slide-out animation.
+  useEffect(() => {
+    const prev = prevContextMapStageRef.current;
+    prevContextMapStageRef.current = contextMap.stage;
+
+    if (contextMap.stage !== 0) {
+      if (contextMapUnmountTimerRef.current !== null) {
+        clearTimeout(contextMapUnmountTimerRef.current);
+        contextMapUnmountTimerRef.current = null;
+      }
+      contextMapVisibleRef.current = true;
+    } else if (prev !== 0 && contextMapVisibleRef.current) {
+      // Stage just became 0 — keep mounted for exit animation, then unmount
+      contextMapUnmountTimerRef.current = setTimeout(() => {
+        contextMapVisibleRef.current = false;
+        contextMapUnmountTimerRef.current = null;
+        // Force a re-render to pick up the new visible state
+        setContextMap((p) => ({ ...p }));
+      }, 450); // match the 0.4s CSS transition + 50ms buffer
+    }
+  }, [contextMap.stage]);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (contextMapUnmountTimerRef.current !== null) {
+        clearTimeout(contextMapUnmountTimerRef.current);
+      }
+    };
+  }, []);
+
+  const isContextMapMounted = contextMapVisibleRef.current || contextMap.stage !== 0;
   const [isResizingLeft, setIsResizingLeft] = useState(false);
   const [isResizingRight, setIsResizingRight] = useState(false);
   const [openAISettings, setOpenAISettings] = useState<OpenAISettings>(DEFAULT_SETTINGS);
@@ -3491,6 +3529,7 @@ export default function App() {
               onMouseDown={startResizingRight}
             />
 
+            {isContextMapMounted && (
             <ContextMapSidebar
               stage={contextMap.stage}
               messages={currentContextMapMessages}
@@ -3509,6 +3548,7 @@ export default function App() {
               onPendingContextRestoreChange={handlePendingContextRestoreChange}
               onEnsureSession={ensureSession}
             />
+            )}
           </>
         )}
       </div>

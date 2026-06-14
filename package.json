@@ -43,6 +43,8 @@
     "@vitejs/plugin-react": "^5.1.0",
     "electron": "^37.10.3",
     "electron-builder": "^26.8.1",
+    "playwright": "^1.60.0",
+    "playwright-core": "^1.60.0",
     "resedit": "^3.0.2",
     "typescript": "^5.9.3",
     "vite": "^7.1.12"

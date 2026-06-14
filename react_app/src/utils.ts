@@ -27,21 +27,46 @@ function estimateTokenCount(text: string): number {
   return Math.ceil(cjkChars * 1.2 + otherChars / 4);
 }
 
+const TOKEN_CACHE_MAX_ENTRIES = 512;
+
+const tokenCache = new Map<string, number>();
+
+function cachedCountTokens(text: string): number {
+  const cached = tokenCache.get(text);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let result = 0;
+
+  if (text.length > MAX_EXACT_TOKEN_CHARS) {
+    result = estimateTokenCount(text);
+  } else {
+    try {
+      result = encoding.encode(text).length;
+    } catch (error) {
+      console.error('Token calculation error:', error);
+      result = 0;
+    }
+  }
+
+  if (tokenCache.size >= TOKEN_CACHE_MAX_ENTRIES) {
+    const oldestKey = tokenCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      tokenCache.delete(oldestKey);
+    }
+  }
+
+  tokenCache.set(text, result);
+  return result;
+}
+
 export function countTokens(text: string): number {
   if (!text) {
     return 0;
   }
 
-  if (text.length > MAX_EXACT_TOKEN_CHARS) {
-    return estimateTokenCount(text);
-  }
-
-  try {
-    return encoding.encode(text).length;
-  } catch (error) {
-    console.error('Token calculation error:', error);
-    return 0;
-  }
+  return cachedCountTokens(text);
 }
 
 const FALLBACK_REASONING_LABELS: Record<string, string> = {
