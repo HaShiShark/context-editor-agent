@@ -100,27 +100,25 @@ The right sidebar turns the raw transcript into a structured, scrollable map:
 
 ![workbench-manual](docs/images_en/screenshot-workbench-1.png)
 
-The right panel is the command center for the second AI model, with four tabs:
+The right panel is the command center for the second AI model, with five tabs:
 
 | Tab | What It Does |
 |-----|-------------|
-| **💡 Suggest** | Auto-analyzes your context: which nodes are bloated, which tool outputs are redundant |
+| **💡 Suggest** | Creates a reviewable proposal; preview/discard are non-destructive, and apply creates a restorable revision |
 | **✏️ Manual** | Chat with the context model — "compress nodes #4-7" or "delete the weather tool output" |
+| **📊 Usage** | Shows provider-reported token usage for the main Agent and context model in this session |
 | **⏪ Restore** | Browse every context revision, click to restore any previous version |
 | **⚙️ Settings** | Configure the context model independently (different model, different provider) |
 
 ### 🔧 Precision Editing Tools
 
-The context model has surgical tools to modify individual items inside the context:
+The context model uses three complementary tools: read first, prefer node batches, and edit items only when necessary:
 
 | Tool | What It Does | Example |
 |------|-------------|---------|
-| `get_node_details` | Inspect a node's full protocol-layer items | "Show me what's inside node #4" |
-| `delete_item` | Remove a specific item from a node | "Delete the shell output from node #6" |
-| `replace_item` | Rewrite an item with new content | "Replace the verbose tool output with a summary" |
-| `compress_item` | AI-compress an item, preserving its type | "Compress the function_call_output in node #3" |
-| `compress_nodes` | Merge multiple nodes into one summary node | "Summarize nodes #2-5 into a single node" |
-| `delete_nodes` | Remove entire nodes from context | "Drop nodes #1-3, they're no longer relevant" |
+| `get_nodes` | Read one or more nodes with full protocol-layer items | "Show me what's inside node #4" |
+| `write_nodes` | Batch-delete and insert nodes to express replacement, compression, or merging | "Summarize nodes #2-5 into one node" |
+| `write_items` | After reading details, edit items inside one node | "Keep the answer but condense its tool output" |
 
 ### ⏪ Version Control for Context
 

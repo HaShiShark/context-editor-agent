@@ -5,7 +5,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from agent_runtime.core.prompt_blocks import PromptBlock
+from agent_runtime.core.canonical_types import PromptBlock
 from agent_runtime.core.stream_events import AdapterStreamEvent
 
 if TYPE_CHECKING:

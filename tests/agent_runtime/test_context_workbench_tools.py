@@ -32,6 +32,31 @@ def make_transcript() -> list[dict[str, object]]:
                     "type": "message",
                     "role": "assistant",
                     "content": "Long tool output that should be summarized.",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "arguments": '{"command":"rg import"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "verbose output",
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "text": "Keep the final decision.",
+            "attachments": [],
+            "toolEvents": [],
+            "blocks": [{"kind": "text", "text": "Keep the final decision."}],
+            "providerItems": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Keep the final decision.",
                 }
             ],
         },
@@ -44,87 +69,144 @@ def decode_tool_output(output_text: str) -> dict[str, object]:
     return decoded
 
 
-def test_tool_catalog_removes_preview_and_adds_final_confirmation() -> None:
-    tool_ids = {item["id"] for item in ContextWorkbenchToolRegistry.tool_catalog()}
-
-    assert "preview_context_selection" not in tool_ids
-    assert "confirm_working_snapshot" in tool_ids
+def transcript_texts(draft: ContextWorkbenchDraft) -> list[str]:
+    return [str(record.get("text") or "") for record in draft.committed_transcript()]
 
 
-def test_tools_do_not_expose_hint_based_targeting() -> None:
+def test_tool_catalog_only_exposes_the_three_current_tools() -> None:
+    tool_ids = [item["id"] for item in ContextWorkbenchToolRegistry.tool_catalog()]
     registry = ContextWorkbenchToolRegistry(ContextWorkbenchDraft(make_transcript(), selected_indexes=[]))
-    forbidden_hint_param = "target" + "_hint"
 
-    for schema in registry.schemas:
-        parameters = schema.get("parameters") or {}
-        properties = parameters.get("properties") or {}
-        assert forbidden_hint_param not in properties
-
-    schemas_by_name = {schema["name"]: schema for schema in registry.schemas}
-    assert schemas_by_name["confirm_working_snapshot"]["parameters"]["required"] == []
-
-    mutation_tools = [
-        "get_context_node_details",
-        "delete_context_item",
-        "replace_context_item",
-        "compress_context_item",
-        "compress_context_nodes",
-        "delete_context_nodes",
-    ]
-    for tool_id in mutation_tools:
-        assert "node_numbers" in schemas_by_name[tool_id]["parameters"]["required"]
+    assert tool_ids == ["get_nodes", "write_nodes", "write_items"]
+    assert [schema["name"] for schema in registry.schemas] == tool_ids
 
 
-def test_mutation_without_node_numbers_requests_explicit_target() -> None:
-    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[1])
-    registry = ContextWorkbenchToolRegistry(draft)
+def test_write_nodes_can_replace_non_contiguous_nodes_with_stable_anchors() -> None:
+    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[])
+    registry = ContextWorkbenchToolRegistry(draft, "Import failure")
 
     result = decode_tool_output(
         registry.execute(
-            "compress_context_nodes",
-            {"summary_markdown": "Summarized import failure analysis."},
-        ).output_text
-    )
-
-    assert result["payload_kind"] == "target_resolution"
-    assert result["resolved"] is False
-    assert result["selected_node_numbers"] == [2]
-    assert result["candidates"] == []
-    assert draft.final_snapshot_payload()["active_node_count"] == 2
-
-
-def test_mutation_returns_delta_and_confirmation_returns_final_snapshot() -> None:
-    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[])
-    registry = ContextWorkbenchToolRegistry(draft)
-
-    mutation = decode_tool_output(
-        registry.execute(
-            "compress_context_nodes",
+            "write_nodes",
             {
-                "node_numbers": [2],
-                "summary_markdown": "Summarized import failure analysis.",
+                "delete": [1, 3],
+                "inserts": [
+                    {
+                        "after": 1,
+                        "role": "user",
+                        "content": "Consolidated request and final decision.",
+                    }
+                ],
             },
         ).output_text
     )
 
-    assert mutation["payload_kind"] == "mutation_delta"
-    assert "working_overview" not in mutation
-    assert mutation["compressed_node_numbers"] == [2]
-    assert mutation["created_node"]["label"] == "Draft Node A"
+    assert result["result"] == {
+        "summary": "Delete #1, 3, Insert 1 node(s)",
+        "deleted": [1, 3],
+        "inserted": 1,
+    }
+    assert "updated_snapshot" in result
+    assert transcript_texts(draft) == [
+        "Consolidated request and final decision.",
+        "Long tool output that should be summarized.",
+    ]
 
-    confirmation = decode_tool_output(registry.execute("confirm_working_snapshot", {}).output_text)
 
-    assert confirmation["payload_kind"] == "final_working_snapshot"
-    assert confirmation["active_node_count"] == 2
-    assert confirmation["inactive_node_count"] == 1
-    assert [node["label"] for node in confirmation["active_nodes"]] == ["Node #1", "Draft Node A"]
-    assert confirmation["inactive_nodes"] == [
+def test_write_nodes_rejects_missing_delete_targets() -> None:
+    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[])
+    registry = ContextWorkbenchToolRegistry(draft)
+
+    execution = registry.execute("write_nodes", {"delete": [9], "inserts": []})
+    result = decode_tool_output(execution.output_text)
+
+    assert execution.status == "error"
+    assert "do not exist" in str(result["error"])
+    assert len(draft.committed_transcript()) == 3
+
+
+def test_write_items_requires_fresh_node_details_and_preserves_item_anchors() -> None:
+    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[])
+    registry = ContextWorkbenchToolRegistry(draft)
+
+    rejected = registry.execute(
+        "write_items",
         {
             "node_number": 2,
-            "label": "Node #2",
-            "status": "compressed",
-            "node_kind": "existing",
-            "active": False,
-            "replaced_by": "Draft Node A",
-        }
-    ]
+            "delete": [2, 3],
+            "inserts": [{"after": 3, "content": "Tool call and output summarized."}],
+        },
+    )
+    assert rejected.status == "error"
+    assert "call get_nodes" in str(decode_tool_output(rejected.output_text)["error"])
+
+    details = decode_tool_output(
+        registry.execute("get_nodes", {"node_numbers": [2]}).output_text
+    )
+    assert len(details["nodes"][0]["items"]) == 3
+
+    edited = decode_tool_output(
+        registry.execute(
+            "write_items",
+            {
+                "node_number": 2,
+                "delete": [2, 3],
+                "inserts": [{"after": 3, "content": "Tool call and output summarized."}],
+            },
+        ).output_text
+    )
+    assert edited["items_deleted"] == 2
+    assert edited["items_inserted"] == 1
+    provider_items = draft.committed_transcript()[1]["providerItems"]
+    assert [item["type"] for item in provider_items] == ["message", "message"]
+    assert provider_items[1]["content"] == "Tool call and output summarized."
+
+    stale_edit = registry.execute(
+        "write_items",
+        {"node_number": 2, "delete": [2], "inserts": []},
+    )
+    assert stale_edit.status == "error"
+    assert "call get_nodes" in str(decode_tool_output(stale_edit.output_text)["error"])
+
+
+def test_review_mode_allows_one_rationalized_node_proposal() -> None:
+    draft = ContextWorkbenchDraft(make_transcript(), selected_indexes=[])
+    registry = ContextWorkbenchToolRegistry(draft, "Import failure", review_mode=True)
+
+    assert [schema["name"] for schema in registry.schemas] == ["write_nodes"]
+    assert registry.schemas[0]["parameters"]["required"] == ["review_rationale"]
+
+    missing_rationale = registry.execute(
+        "write_nodes",
+        {"delete": [1], "inserts": []},
+    )
+    assert missing_rationale.status == "error"
+    assert not draft.has_changes
+
+    first = registry.execute(
+        "write_nodes",
+        {
+            "delete": [1, 3],
+            "inserts": [
+                {
+                    "after": 1,
+                    "role": "user",
+                    "content": "Consolidated request and final decision.",
+                }
+            ],
+            "review_rationale": "合并重复需求，同时保留当前结论。",
+        },
+    )
+    assert first.status == "completed"
+    assert draft.revision_summary() == "合并重复需求，同时保留当前结论。"
+
+    second = registry.execute(
+        "write_nodes",
+        {
+            "delete": [2],
+            "inserts": [],
+            "review_rationale": "再删除一次。",
+        },
+    )
+    assert second.status == "error"
+    assert "exactly one" in str(decode_tool_output(second.output_text)["error"])

@@ -1,21 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
-from agent_runtime.adapters import (
-    ChatCompletionsAdapter,
-    ClaudeAdapter,
-    GeminiAdapter,
-    ProviderRequestContext,
-    ResponsesAdapter,
-    ResponsesStreamResult,
-)
+from agent_runtime.adapters import ProviderRequestContext, ResponsesStreamResult
 from agent_runtime.core.agent_core import AgentCore
-from agent_runtime.core.prompt_blocks import PromptBlock
+from agent_runtime.core.canonical_types import PromptBlock
 from agent_runtime.core.stream_events import (
     ProviderDoneEvent,
     ReasoningDeltaEvent,
@@ -24,9 +16,16 @@ from agent_runtime.core.stream_events import (
     TextDeltaEvent,
     ToolCallReadyEvent,
 )
-from simple_agent.config import Settings
-from simple_agent.provider_clients import ClaudeRESTClient, GeminiRESTClient
-from simple_agent.tools import ToolRegistry
+from agent_runtime.provider_factory import (
+    CHAT_PROVIDER_TYPE,
+    CLAUDE_PROVIDER_TYPE,
+    GEMINI_PROVIDER_TYPE,
+    RESPONSES_PROVIDER_TYPE,
+    build_provider_adapter,
+    build_provider_client,
+)
+from app_agent.settings import Settings
+from app_agent.tools import ToolRegistry
 
 
 @dataclass(slots=True)
@@ -49,18 +48,14 @@ class BridgedFunctionCall:
 
 
 StreamResult = ResponsesStreamResult
-_RESPONSES_PROVIDER_TYPE = "responses"
-_CHAT_PROVIDER_TYPE = "chat_completion"
-_CLAUDE_PROVIDER_TYPE = "claude"
-_GEMINI_PROVIDER_TYPE = "gemini"
 _TEXT_PART_TYPES = {"", "text", "input_text", "output_text"}
 _IMAGE_PART_TYPES = {"input_image", "image_url"}
 _NON_RESPONSE_ALLOWED_PARTS = {
-    _CHAT_PROVIDER_TYPE: _TEXT_PART_TYPES | _IMAGE_PART_TYPES,
-    _CLAUDE_PROVIDER_TYPE: _TEXT_PART_TYPES
+    CHAT_PROVIDER_TYPE: _TEXT_PART_TYPES | _IMAGE_PART_TYPES,
+    CLAUDE_PROVIDER_TYPE: _TEXT_PART_TYPES
     | _IMAGE_PART_TYPES
     | {"image", "thinking", "redacted_thinking", "tool_use", "tool_result"},
-    _GEMINI_PROVIDER_TYPE: _TEXT_PART_TYPES,
+    GEMINI_PROVIDER_TYPE: _TEXT_PART_TYPES,
 }
 
 
@@ -88,15 +83,15 @@ def sanitize_value(value: Any) -> Any:
     return value
 
 
-class SimpleAgent:
+class SessionAgent:
     def __init__(self, settings: Settings, *, include_default_instructions: bool = True) -> None:
         self.settings = settings
         self.include_default_instructions = include_default_instructions
         self.active_provider = sanitize_value(settings.active_provider())
         self.provider_id = sanitize_text(self.active_provider.get("id") or "openai").strip() or "openai"
         self.provider_type = sanitize_text(
-            self.active_provider.get("provider_type") or _RESPONSES_PROVIDER_TYPE
-        ).strip() or _RESPONSES_PROVIDER_TYPE
+            self.active_provider.get("provider_type") or RESPONSES_PROVIDER_TYPE
+        ).strip() or RESPONSES_PROVIDER_TYPE
         self.provider_api_key = sanitize_text(
             self.active_provider.get("api_key") or settings.openai_api_key or ""
         ).strip()
@@ -110,6 +105,7 @@ class SimpleAgent:
         self.context_role = "developer"
         self.instructions = self._build_instructions() if include_default_instructions else ""
         self._request_input_observer: Callable[[list[dict[str, Any]], dict[str, Any]], None] | None = None
+        self._usage_records: list[dict[str, Any]] = []
         self.adapter = self._build_adapter()
 
     def _build_instructions(self) -> str:
@@ -230,6 +226,25 @@ class SimpleAgent:
     def reset(self) -> None:
         self.history = []
 
+    def reset_usage_tracking(self) -> None:
+        self._usage_records = []
+
+    def pop_usage_records(self) -> list[dict[str, Any]]:
+        records = sanitize_value(self._usage_records)
+        self._usage_records = []
+        return records
+
+    def _capture_usage(self, result: StreamResult, model: Any) -> None:
+        usage = getattr(result, "usage", None)
+        if not isinstance(usage, Mapping) or not usage:
+            return
+        self._usage_records.append(
+            {
+                "model": sanitize_text(model or "").strip(),
+                "usage": sanitize_value(dict(usage)),
+            }
+        )
+
     def run_turn(
         self,
         user_message: str,
@@ -267,6 +282,7 @@ class SimpleAgent:
         )
         previous_observer = self._request_input_observer
         self._request_input_observer = on_request_input
+        self.reset_usage_tracking()
         try:
             return core.run_turn(
                 user_message,
@@ -286,38 +302,16 @@ class SimpleAgent:
             self._request_input_observer = previous_observer
 
     def _build_provider_client(self) -> Any:
-        if self.provider_type == _CLAUDE_PROVIDER_TYPE:
-            return ClaudeRESTClient(
-                self.provider_api_base_url or "https://api.anthropic.com/v1",
-                self.provider_api_key,
-            )
-
-        if self.provider_type == _GEMINI_PROVIDER_TYPE:
-            return GeminiRESTClient(
-                self.provider_api_base_url
-                or "https://generativelanguage.googleapis.com/v1beta",
-                self.provider_api_key,
-            )
-
-        from openai import OpenAI
-
-        client_kwargs: dict[str, Any] = {
-            "api_key": self.provider_api_key or os.getenv("OPENAI_API_KEY") or "not-needed",
-        }
-        if self.provider_api_base_url:
-            client_kwargs["base_url"] = self.provider_api_base_url
-        return OpenAI(**client_kwargs)
+        return build_provider_client(
+            provider_type=self.provider_type,
+            api_key=self.provider_api_key,
+            api_base_url=self.provider_api_base_url,
+        )
 
     def _build_adapter(self) -> Any:
-        if self.provider_type == _CHAT_PROVIDER_TYPE:
-            return ChatCompletionsAdapter(self.client)
-        if self.provider_type == _CLAUDE_PROVIDER_TYPE:
-            return ClaudeAdapter(self.client)
-        if self.provider_type == _GEMINI_PROVIDER_TYPE:
-            return GeminiAdapter(self.client)
-
-        return ResponsesAdapter(
-            self.client,
+        return build_provider_adapter(
+            provider_type=self.provider_type,
+            client=self.client,
             instructions=lambda: self.instructions,
             request_input=self._request_input,
             tools=lambda: self.tools.schemas,
@@ -334,17 +328,19 @@ class SimpleAgent:
         on_reasoning_done: Callable[[], None] | None = None,
         **request: Any,
     ) -> StreamResult:
-        if self.provider_type == _RESPONSES_PROVIDER_TYPE:
-            return self.adapter.stream_response(
+        if self.provider_type == RESPONSES_PROVIDER_TYPE:
+            result = self.adapter.stream_response(
                 on_text_delta=on_text_delta,
                 on_reasoning_start=on_reasoning_start,
                 on_reasoning_delta=on_reasoning_delta,
                 on_reasoning_done=on_reasoning_done,
                 **request,
             )
+            self._capture_usage(result, request.get("model"))
+            return result
 
         provider_request, context = self._normalize_provider_request(request)
-        return self._stream_adapter_response(
+        result = self._stream_adapter_response(
             provider_request=provider_request,
             context=context,
             on_text_delta=on_text_delta,
@@ -352,6 +348,8 @@ class SimpleAgent:
             on_reasoning_delta=on_reasoning_delta,
             on_reasoning_done=on_reasoning_done,
         )
+        self._capture_usage(result, provider_request.get("model"))
+        return result
 
     def _normalize_provider_request(
         self,
@@ -378,6 +376,7 @@ class SimpleAgent:
         canonical_items: list[Any] = []
         final_output_text = ""
         finish_reason: str | None = None
+        usage: Mapping[str, Any] | None = None
 
         for event in self.adapter.stream_response(provider_request, context):
             if isinstance(event, TextDeltaEvent):
@@ -423,6 +422,7 @@ class SimpleAgent:
                 final_output_text = sanitize_text(event.output_text)
                 finish_reason = getattr(event, "finish_reason", None)
                 canonical_items = list(sanitize_value(event.canonical_items or ()))
+                usage = sanitize_value(dict(event.usage)) if isinstance(event.usage, Mapping) else None
 
         output_text = "".join(output_chunks) or final_output_text
         if not output_chunks and final_output_text and on_text_delta is not None:
@@ -433,6 +433,7 @@ class SimpleAgent:
             function_calls=function_calls,
             finish_reason=finish_reason,
             canonical_items=canonical_items,
+            usage=usage,
         )
 
     def _request_input(self, turn_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -485,7 +486,7 @@ class SimpleAgent:
         prompt_blocks = tuple(self._prompt_blocks())
         provider_config: dict[str, Any] = self._provider_config()
 
-        if self.provider_type == _RESPONSES_PROVIDER_TYPE:
+        if self.provider_type == RESPONSES_PROVIDER_TYPE:
             prompt_message = self._message(self.context_role, self.instructions)
             transcript_items = [prompt_message, *transcript_items]
             prompt_blocks = ()
@@ -515,7 +516,7 @@ class SimpleAgent:
         if self.settings.temperature is not None:
             config["temperature"] = self.settings.temperature
         if self.settings.top_p is not None:
-            if self.provider_type == _GEMINI_PROVIDER_TYPE:
+            if self.provider_type == GEMINI_PROVIDER_TYPE:
                 config["topP"] = self.settings.top_p
             else:
                 config["top_p"] = self.settings.top_p
@@ -590,7 +591,7 @@ class SimpleAgent:
             PromptBlock(
                 kind=self._prompt_block_kind(),
                 text=self.instructions,
-                source="simple_agent",
+                source="app_agent",
             )
         ]
 
@@ -623,14 +624,14 @@ class SimpleAgent:
                     continue
 
                 provider_label = {
-                    _CHAT_PROVIDER_TYPE: "Chat Completions",
-                    _CLAUDE_PROVIDER_TYPE: "Claude",
-                    _GEMINI_PROVIDER_TYPE: "Gemini",
+                    CHAT_PROVIDER_TYPE: "Chat Completions",
+                    CLAUDE_PROVIDER_TYPE: "Claude",
+                    GEMINI_PROVIDER_TYPE: "Gemini",
                 }.get(self.provider_type, self.provider_type)
+                if part_type == "input_file":
+                    raise RuntimeError(f"{provider_label} 当前只支持文本和图片附件")
                 raise RuntimeError(
-                    f"{provider_label} 当前只支持文本"
-                    if part_type == "input_file"
-                    else f"{provider_label} 当前还不支持这种消息内容类型：{part_type or 'unknown'}"
+                    f"{provider_label} 当前不支持这种消息内容类型：{part_type or 'unknown'}"
                 )
 
     def _message_text(self, content: Any) -> str:
@@ -713,3 +714,14 @@ class SimpleAgent:
         if len(compact) <= limit:
             return compact
         return f"{compact[: limit - 3]}..."
+
+
+__all__ = [
+    "BridgedFunctionCall",
+    "SessionAgent",
+    "StreamResult",
+    "ToolEvent",
+    "sanitize_text",
+    "sanitize_value",
+]
+

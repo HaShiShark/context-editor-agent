@@ -2,9 +2,10 @@ import type {
   ComposerAttachment,
   ContextChatResponse,
   ContextChatStreamEvent,
+  ContextReviewResponse,
+  SessionUsageResponse,
   ContextRestoreResponse,
   ContextWorkbenchSettingsResponse,
-  ContextWorkbenchSuggestionsResponse,
   CreateProjectResponse,
   CreateSessionResponse,
   DeleteProjectResponse,
@@ -203,14 +204,7 @@ export function saveSettingsRequest(payload: {
   user_locale?: string;
   user_timezone?: string;
   user_profile?: string;
-  theme_color?: string;
-  theme_mode?: 'light' | 'dark' | 'system';
-  background_color?: string;
-  ui_font?: string;
-  code_font?: string;
-  ui_font_size?: number;
-  code_font_size?: number;
-  appearance_contrast?: number;
+  theme_mode?: 'light' | 'dark';
   service_hints_enabled?: boolean;
   openai_api_key?: string;
   clear_api_key?: boolean;
@@ -281,6 +275,8 @@ export function saveContextWorkbenchSettingsRequest(payload: {
   context_workbench_provider_id?: string;
   context_token_warning_threshold?: number;
   context_token_critical_threshold?: number;
+  context_review_auto_enabled?: boolean;
+  context_review_interval_minutes?: number;
 }): Promise<ContextWorkbenchSettingsResponse> {
   return apiFetch<ContextWorkbenchSettingsResponse>('/api/context-workbench-settings', {
     method: 'POST',
@@ -288,10 +284,22 @@ export function saveContextWorkbenchSettingsRequest(payload: {
   });
 }
 
-export function fetchContextWorkbenchSuggestionsRequest(payload: {
+export function contextReviewRequest(payload: {
   session_id: string;
-}): Promise<ContextWorkbenchSuggestionsResponse> {
-  return apiFetch<ContextWorkbenchSuggestionsResponse>('/api/context-workbench-suggestions', {
+  action: 'status' | 'generate' | 'apply' | 'discard';
+  review_id?: string;
+}): Promise<ContextReviewResponse> {
+  return apiFetch<ContextReviewResponse>('/api/context-review', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function sessionUsageRequest(payload: {
+  session_id: string;
+  action: 'status' | 'reset';
+}): Promise<SessionUsageResponse> {
+  return apiFetch<SessionUsageResponse>('/api/session-usage', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

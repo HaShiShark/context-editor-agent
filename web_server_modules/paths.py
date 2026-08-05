@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from simple_agent.agent import sanitize_text
+from app_agent.session_agent import sanitize_text
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,3 +43,4 @@ def resolve_attachment_file_path(relative_path: str) -> Path | None:
     repo_root = REPO_ROOT.resolve()
     candidate = (REPO_ROOT / safe_relative_path).resolve()
     return candidate if is_relative_to_path(candidate, repo_root) else None
+

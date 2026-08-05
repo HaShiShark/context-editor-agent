@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from simple_agent import config as config_module
-from simple_agent.config import Settings
+from app_agent import settings as config_module
+from app_agent.settings import Settings
 from web_server import build_context_workbench_agent, resolve_context_workbench_provider_id
 
 
@@ -106,3 +106,4 @@ def test_settings_load_repairs_context_provider_from_context_model(tmp_path, mon
     loaded = config_module.load_settings()
 
     assert loaded.context_workbench_provider_id == "gemini"
+

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+import os
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+
+from agent_runtime.adapters import (
+    ChatCompletionsAdapter,
+    ClaudeAdapter,
+    GeminiAdapter,
+    ResponsesAdapter,
+)
+
+
+RESPONSES_PROVIDER_TYPE = "responses"
+CHAT_PROVIDER_TYPE = "chat_completion"
+CLAUDE_PROVIDER_TYPE = "claude"
+GEMINI_PROVIDER_TYPE = "gemini"
 
 
 def _sanitize_text(value: Any) -> str:
@@ -151,9 +165,7 @@ class GeminiRESTClient:
         encoded_model = urllib_parse.quote(model, safe="/")
         return SSEJSONStream(
             f"{self.base_url}/models/{encoded_model}:streamGenerateContent?alt=sse",
-            headers={
-                "x-goog-api-key": self.api_key,
-            },
+            headers={"x-goog-api-key": self.api_key},
             payload=request_body,
         )
 
@@ -191,8 +203,73 @@ class GeminiRESTClient:
         return parsed
 
 
+def build_provider_client(
+    *,
+    provider_type: str,
+    api_key: str,
+    api_base_url: str,
+) -> Any:
+    """Create the raw provider client for a runtime provider type."""
+
+    if provider_type == CLAUDE_PROVIDER_TYPE:
+        return ClaudeRESTClient(
+            api_base_url or "https://api.anthropic.com/v1",
+            api_key,
+        )
+
+    if provider_type == GEMINI_PROVIDER_TYPE:
+        return GeminiRESTClient(
+            api_base_url or "https://generativelanguage.googleapis.com/v1beta",
+            api_key,
+        )
+
+    from openai import OpenAI
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key or os.getenv("OPENAI_API_KEY") or "not-needed",
+    }
+    if api_base_url:
+        client_kwargs["base_url"] = api_base_url
+    return OpenAI(**client_kwargs)
+
+
+def build_provider_adapter(
+    *,
+    provider_type: str,
+    client: Any,
+    instructions: str | Callable[[], str],
+    request_input: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None,
+    tools: Sequence[Mapping[str, Any]] | Callable[[], Sequence[Mapping[str, Any]]],
+    sanitize_text: Callable[[Any], str],
+    sanitize_value: Callable[[Any], Any],
+) -> Any:
+    """Create the provider adapter that translates runtime state to wire calls."""
+
+    if provider_type == CHAT_PROVIDER_TYPE:
+        return ChatCompletionsAdapter(client)
+    if provider_type == CLAUDE_PROVIDER_TYPE:
+        return ClaudeAdapter(client)
+    if provider_type == GEMINI_PROVIDER_TYPE:
+        return GeminiAdapter(client)
+
+    return ResponsesAdapter(
+        client,
+        instructions=instructions,
+        request_input=request_input,
+        tools=tools,
+        sanitize_text=sanitize_text,
+        sanitize_value=sanitize_value,
+    )
+
+
 __all__ = [
-    "ClaudeRESTClient",
+    "CHAT_PROVIDER_TYPE",
+    "CLAUDE_PROVIDER_TYPE",
     "GeminiRESTClient",
+    "ClaudeRESTClient",
     "SSEJSONStream",
+    "GEMINI_PROVIDER_TYPE",
+    "RESPONSES_PROVIDER_TYPE",
+    "build_provider_adapter",
+    "build_provider_client",
 ]

@@ -10,7 +10,7 @@ from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
 
-from simple_agent.tools import normalize_tool_settings
+from app_agent.tools import normalize_tool_settings
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -70,6 +70,7 @@ REASONING_EFFORTS = {"default", "none", "low", "medium", "high"}
 DEFAULT_REASONING_EFFORT = "default"
 DEFAULT_CONTEXT_TOKEN_WARNING_THRESHOLD = 5000
 DEFAULT_CONTEXT_TOKEN_CRITICAL_THRESHOLD = 10000
+DEFAULT_CONTEXT_REVIEW_INTERVAL_MINUTES = 10
 DEFAULT_ASSISTANT_NAME = "Hanako"
 DEFAULT_ASSISTANT_GREETING = "对话开始时先接住情绪，再推进任务，不要一上来就像客服一样念模板。"
 DEFAULT_ASSISTANT_PROMPT = "你是一个温柔、可靠、说人话的助手。先理解我的真实意图，再给出清晰直接的建议；少一些官话，多一些陪我一起把事情做完的感觉。"
@@ -77,14 +78,7 @@ DEFAULT_USER_NAME = "小宝"
 DEFAULT_USER_LOCALE = "zh-CN"
 DEFAULT_USER_TIMEZONE = "Asia/Shanghai"
 DEFAULT_USER_PROFILE = "希望它更像一个陪我做事的搭档，不要太客服腔。帮我收住情绪，也帮我推进执行。"
-DEFAULT_THEME_COLOR = "paper-ink-white"
-DEFAULT_THEME_MODE = "dark"
-DEFAULT_BACKGROUND_COLOR = "#111111"
-DEFAULT_UI_FONT = "Noto Serif SC"
-DEFAULT_CODE_FONT = "JetBrains Mono"
-DEFAULT_UI_FONT_SIZE = 16
-DEFAULT_CODE_FONT_SIZE = 14
-DEFAULT_APPEARANCE_CONTRAST = 45
+DEFAULT_THEME_MODE = "light"
 _UNSET = object()
 
 
@@ -224,23 +218,9 @@ def _normalize_bounded_int(value: Any, *, min_value: int, max_value: int, fallba
     return parsed if parsed is not None else fallback
 
 
-def _normalize_hex_color(value: Any, fallback: str) -> str:
-    cleaned = _clean_string(value)
-    if re.fullmatch(r"#[0-9a-fA-F]{6}", cleaned):
-        return cleaned
-    return fallback
-
-
-def _normalize_theme_color(value: Any, fallback: str = DEFAULT_THEME_COLOR) -> str:
-    cleaned = _clean_string(value)
-    if cleaned == DEFAULT_THEME_COLOR or re.fullmatch(r"#[0-9a-fA-F]{6}", cleaned):
-        return cleaned
-    return fallback
-
-
 def _normalize_theme_mode(value: Any, fallback: str = DEFAULT_THEME_MODE) -> str:
     cleaned = _clean_string(value)
-    return cleaned if cleaned in {"light", "dark", "system"} else fallback
+    return cleaned if cleaned in {"light", "dark"} else fallback
 
 
 def _normalize_reasoning_effort(value: Any) -> str:
@@ -487,14 +467,9 @@ class Settings:
     user_profile: str = DEFAULT_USER_PROFILE
     context_token_warning_threshold: int = DEFAULT_CONTEXT_TOKEN_WARNING_THRESHOLD
     context_token_critical_threshold: int = DEFAULT_CONTEXT_TOKEN_CRITICAL_THRESHOLD
-    theme_color: str = DEFAULT_THEME_COLOR
+    context_review_auto_enabled: bool = True
+    context_review_interval_minutes: int = DEFAULT_CONTEXT_REVIEW_INTERVAL_MINUTES
     theme_mode: str = DEFAULT_THEME_MODE
-    background_color: str = DEFAULT_BACKGROUND_COLOR
-    ui_font: str = DEFAULT_UI_FONT
-    code_font: str = DEFAULT_CODE_FONT
-    ui_font_size: int = DEFAULT_UI_FONT_SIZE
-    code_font_size: int = DEFAULT_CODE_FONT_SIZE
-    appearance_contrast: int = DEFAULT_APPEARANCE_CONTRAST
     service_hints_enabled: bool = True
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -520,6 +495,8 @@ class Settings:
             "context_workbench_provider_id": self.context_workbench_provider_id,
             "context_token_warning_threshold": self.context_token_warning_threshold,
             "context_token_critical_threshold": self.context_token_critical_threshold,
+            "context_review_auto_enabled": self.context_review_auto_enabled,
+            "context_review_interval_minutes": self.context_review_interval_minutes,
             "openai_base_url": self.openai_base_url or "",
             "max_tool_rounds": self.max_tool_rounds,
             "assistant_name": self.assistant_name,
@@ -533,14 +510,7 @@ class Settings:
             "user_locale": self.user_locale,
             "user_timezone": self.user_timezone,
             "user_profile": self.user_profile,
-            "theme_color": self.theme_color,
             "theme_mode": self.theme_mode,
-            "background_color": self.background_color,
-            "ui_font": self.ui_font,
-            "code_font": self.code_font,
-            "ui_font_size": self.ui_font_size,
-            "code_font_size": self.code_font_size,
-            "appearance_contrast": self.appearance_contrast,
             "service_hints_enabled": self.service_hints_enabled,
             "tool_settings": normalize_tool_settings(self.tool_settings),
             "has_api_key": bool(self.openai_api_key),
@@ -575,6 +545,14 @@ def load_settings() -> Settings:
         stored.get("context_token_warning_threshold"),
         stored.get("context_token_critical_threshold"),
     )
+    context_review_auto_enabled = bool(stored.get("context_review_auto_enabled", True))
+    try:
+        context_review_interval_minutes = min(
+            1440,
+            max(1, int(stored.get("context_review_interval_minutes", DEFAULT_CONTEXT_REVIEW_INTERVAL_MINUTES))),
+        )
+    except (TypeError, ValueError):
+        context_review_interval_minutes = DEFAULT_CONTEXT_REVIEW_INTERVAL_MINUTES
 
     raw_rounds = stored.get("max_tool_rounds", os.getenv("MAX_TOOL_ROUNDS", "999999"))
     try:
@@ -629,29 +607,7 @@ def load_settings() -> Settings:
     user_locale = _clean_string(stored.get("user_locale")) or DEFAULT_USER_LOCALE
     user_timezone = _stored_editable_text(stored, "user_timezone", DEFAULT_USER_TIMEZONE)
     user_profile = _stored_editable_text(stored, "user_profile", DEFAULT_USER_PROFILE)
-    theme_color = _normalize_theme_color(stored.get("theme_color"))
     theme_mode = _normalize_theme_mode(stored.get("theme_mode"))
-    background_color = _normalize_hex_color(stored.get("background_color"), DEFAULT_BACKGROUND_COLOR)
-    ui_font = _clean_string(stored.get("ui_font")) or DEFAULT_UI_FONT
-    code_font = _clean_string(stored.get("code_font")) or DEFAULT_CODE_FONT
-    ui_font_size = _normalize_bounded_int(
-        stored.get("ui_font_size"),
-        min_value=12,
-        max_value=22,
-        fallback=DEFAULT_UI_FONT_SIZE,
-    )
-    code_font_size = _normalize_bounded_int(
-        stored.get("code_font_size"),
-        min_value=11,
-        max_value=20,
-        fallback=DEFAULT_CODE_FONT_SIZE,
-    )
-    appearance_contrast = _normalize_bounded_int(
-        stored.get("appearance_contrast"),
-        min_value=30,
-        max_value=80,
-        fallback=DEFAULT_APPEARANCE_CONTRAST,
-    )
     service_hints_enabled = bool(stored.get("service_hints_enabled", True))
 
     return Settings(
@@ -677,14 +633,9 @@ def load_settings() -> Settings:
         user_profile=user_profile,
         context_token_warning_threshold=context_token_warning_threshold,
         context_token_critical_threshold=context_token_critical_threshold,
-        theme_color=theme_color,
+        context_review_auto_enabled=context_review_auto_enabled,
+        context_review_interval_minutes=context_review_interval_minutes,
         theme_mode=theme_mode,
-        background_color=background_color,
-        ui_font=ui_font,
-        code_font=code_font,
-        ui_font_size=ui_font_size,
-        code_font_size=code_font_size,
-        appearance_contrast=appearance_contrast,
         service_hints_enabled=service_hints_enabled,
         openai_api_key=openai_api_key,
         openai_base_url=openai_base_url,
@@ -699,6 +650,8 @@ def save_settings(
     context_workbench_provider_id: str | None = None,
     context_token_warning_threshold: int | None = None,
     context_token_critical_threshold: int | None = None,
+    context_review_auto_enabled: bool | None = None,
+    context_review_interval_minutes: int | None = None,
     openai_base_url: str | None = None,
     max_tool_rounds: int | None = None,
     assistant_name: str | None = None,
@@ -712,14 +665,7 @@ def save_settings(
     user_locale: str | None = None,
     user_timezone: str | None = None,
     user_profile: str | None = None,
-    theme_color: str | None = None,
     theme_mode: str | None = None,
-    background_color: str | None = None,
-    ui_font: str | None = None,
-    code_font: str | None = None,
-    ui_font_size: int | None = None,
-    code_font_size: int | None = None,
-    appearance_contrast: int | None = None,
     service_hints_enabled: bool | None = None,
     openai_api_key: str | None = None,
     clear_api_key: bool = False,
@@ -900,6 +846,17 @@ def save_settings(
     )
     current["context_token_warning_threshold"] = next_context_token_warning_threshold
     current["context_token_critical_threshold"] = next_context_token_critical_threshold
+    if context_review_auto_enabled is not None:
+        current["context_review_auto_enabled"] = bool(context_review_auto_enabled)
+    elif "context_review_auto_enabled" not in current:
+        current["context_review_auto_enabled"] = loaded.context_review_auto_enabled
+    if context_review_interval_minutes is not None:
+        current["context_review_interval_minutes"] = min(
+            1440,
+            max(1, int(context_review_interval_minutes)),
+        )
+    elif "context_review_interval_minutes" not in current:
+        current["context_review_interval_minutes"] = loaded.context_review_interval_minutes
 
     if max_tool_rounds is not None:
         current["max_tool_rounds"] = max(1, int(max_tool_rounds))
@@ -927,37 +884,18 @@ def save_settings(
         current["user_timezone"] = _clean_string(user_timezone)
     if user_profile is not None:
         current["user_profile"] = _clean_string(user_profile)
-    if theme_color is not None:
-        current["theme_color"] = _normalize_theme_color(theme_color)
+    for legacy_key in (
+        "theme_color",
+        "background_color",
+        "ui_font",
+        "code_font",
+        "ui_font_size",
+        "code_font_size",
+        "appearance_contrast",
+    ):
+        current.pop(legacy_key, None)
     if theme_mode is not None:
         current["theme_mode"] = _normalize_theme_mode(theme_mode)
-    if background_color is not None:
-        current["background_color"] = _normalize_hex_color(background_color, DEFAULT_BACKGROUND_COLOR)
-    if ui_font is not None:
-        current["ui_font"] = _clean_string(ui_font) or DEFAULT_UI_FONT
-    if code_font is not None:
-        current["code_font"] = _clean_string(code_font) or DEFAULT_CODE_FONT
-    if ui_font_size is not None:
-        current["ui_font_size"] = _normalize_bounded_int(
-            ui_font_size,
-            min_value=12,
-            max_value=22,
-            fallback=DEFAULT_UI_FONT_SIZE,
-        )
-    if code_font_size is not None:
-        current["code_font_size"] = _normalize_bounded_int(
-            code_font_size,
-            min_value=11,
-            max_value=20,
-            fallback=DEFAULT_CODE_FONT_SIZE,
-        )
-    if appearance_contrast is not None:
-        current["appearance_contrast"] = _normalize_bounded_int(
-            appearance_contrast,
-            min_value=30,
-            max_value=80,
-            fallback=DEFAULT_APPEARANCE_CONTRAST,
-        )
     if service_hints_enabled is not None:
         current["service_hints_enabled"] = bool(service_hints_enabled)
 

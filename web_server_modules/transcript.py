@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from collections.abc import Callable
 from typing import Any
 
-from simple_agent.agent import SimpleAgent, sanitize_text
+from app_agent.session_agent import SessionAgent, sanitize_text
 
 from .attachments import attachment_inputs_from_records, normalize_attachment_records
 from .serialization import sanitize_value
@@ -295,7 +295,7 @@ def flush_assistant_text_buffer(
         return
 
     provider_items.append(
-        SimpleAgent._message(
+        SessionAgent._message(
             "assistant",
             "".join(text_buffer),
         )
@@ -535,7 +535,7 @@ def build_provider_items_for_record(
     safe_role = sanitize_text(role).strip()
     if safe_role == "user":
         return [
-            SimpleAgent._message(
+            SessionAgent._message(
                 "user",
                 sanitize_text(text),
                 attachments=attachment_inputs_from_records(attachments),
@@ -599,7 +599,7 @@ def build_provider_items_for_record(
 
     if not provider_items:
         provider_items.append(
-            SimpleAgent._message(
+            SessionAgent._message(
                 "assistant",
                 sanitize_text(text),
             )
@@ -607,7 +607,7 @@ def build_provider_items_for_record(
     elif provider_items[-1].get("type") != "message":
         fallback_text = sanitize_text(text or "")
         provider_items.append(
-            SimpleAgent._message(
+            SessionAgent._message(
                 "assistant",
                 fallback_text,
             )
@@ -615,7 +615,7 @@ def build_provider_items_for_record(
     elif saw_tool:
         last_item_content = provider_items[-1].get("content")
         if not sanitize_text(last_item_content or "").strip():
-            provider_items[-1] = SimpleAgent._message(
+            provider_items[-1] = SessionAgent._message(
                 "assistant",
                 sanitize_text(text or ""),
             )
@@ -950,3 +950,5 @@ def compile_record_from_provider_items(
         "blocks": sanitize_value(blocks),
         "providerItems": sanitize_value(normalized_provider_items),
     }
+
+

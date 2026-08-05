@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "3"
 
 
 class SQLiteStateStore:
@@ -109,9 +109,11 @@ class SQLiteStateStore:
                             transcript_json,
                             context_workbench_history_json,
                             context_revisions_json,
-                            pending_context_restore_json
+                            pending_context_restore_json,
+                            pending_context_review_json,
+                            usage_summary_json
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             safe_session_id,
@@ -122,6 +124,8 @@ class SQLiteStateStore:
                             _json_dumps(session.get("context_workbench_history", [])),
                             _json_dumps(session.get("context_revisions", [])),
                             _json_dumps(session.get("pending_context_restore")),
+                            _json_dumps(session.get("pending_context_review")),
+                            _json_dumps(session.get("usage_summary", {})),
                         ),
                     )
 
@@ -203,7 +207,9 @@ class SQLiteStateStore:
                 transcript_json,
                 context_workbench_history_json,
                 context_revisions_json,
-                pending_context_restore_json
+                pending_context_restore_json,
+                pending_context_review_json,
+                usage_summary_json
             FROM sessions
             """
         ):
@@ -216,6 +222,8 @@ class SQLiteStateStore:
                 "context_workbench_history": _json_loads(row["context_workbench_history_json"], []),
                 "context_revisions": _json_loads(row["context_revisions_json"], []),
                 "pending_context_restore": _json_loads(row["pending_context_restore_json"], None),
+                "pending_context_review": _json_loads(row["pending_context_review_json"], None),
+                "usage_summary": _json_loads(row["usage_summary_json"], {}),
             }
 
         return {
@@ -260,7 +268,9 @@ class SQLiteStateStore:
                     transcript_json TEXT NOT NULL,
                     context_workbench_history_json TEXT NOT NULL,
                     context_revisions_json TEXT NOT NULL,
-                    pending_context_restore_json TEXT NOT NULL
+                    pending_context_restore_json TEXT NOT NULL,
+                    pending_context_review_json TEXT NOT NULL DEFAULT 'null',
+                    usage_summary_json TEXT NOT NULL DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_session_order (
@@ -277,6 +287,18 @@ class SQLiteStateStore:
                 );
                 """
             )
+            session_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(sessions)")
+            }
+            if "pending_context_review_json" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN pending_context_review_json TEXT NOT NULL DEFAULT 'null'"
+                )
+            if "usage_summary_json" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN usage_summary_json TEXT NOT NULL DEFAULT '{}'"
+                )
 
     def _has_state(self, connection: sqlite3.Connection) -> bool:
         for table_name in ("projects", "sessions", "chat_session_order", "project_session_order"):

@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
 from agent_runtime.adapters.base import ProviderRequestContext
 from agent_runtime.adapters.claude_adapter import ClaudeAdapter
 from agent_runtime.core.stream_events import ProviderDoneEvent, ToolCallReadyEvent
-from simple_agent.agent import SimpleAgent
+from app_agent.session_agent import SessionAgent
 
 
 def test_build_request_converts_input_image_data_url_to_claude_image_block() -> None:
@@ -78,7 +78,7 @@ def test_build_request_converts_image_url_part_to_claude_url_image_block() -> No
 
 
 def test_claude_agent_allows_image_content_parts_before_adapter_translation() -> None:
-    agent = SimpleAgent.__new__(SimpleAgent)
+    agent = SessionAgent.__new__(SessionAgent)
     agent.provider_type = "claude"
 
     agent._assert_supported_content_parts(
@@ -96,7 +96,7 @@ def test_claude_agent_allows_image_content_parts_before_adapter_translation() ->
 
 
 def test_claude_agent_allows_preserved_thinking_and_tool_use_parts() -> None:
-    agent = SimpleAgent.__new__(SimpleAgent)
+    agent = SessionAgent.__new__(SessionAgent)
     agent.provider_type = "claude"
 
     agent._assert_supported_content_parts(
@@ -272,3 +272,5 @@ def test_stream_response_canonical_items_include_thinking_signature_and_tool_use
             ],
         },
     )
+
+

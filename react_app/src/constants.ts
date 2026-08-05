@@ -1,6 +1,4 @@
-import type { PermissionOption, ThemeOption } from './types';
-
-export const PAPER_INK_WHITE_THEME = 'paper-ink-white';
+import type { PermissionOption } from './types';
 
 export const INITIAL_TOAST_MESSAGE = '本地工作台已经就绪。';
 
@@ -23,13 +21,6 @@ export const PERMISSION_OPTIONS: PermissionOption[] = [
   },
 ];
 
-export const THEME_OPTIONS: ThemeOption[] = [
-  { value: PAPER_INK_WHITE_THEME, label: '纸墨白' },
-  { value: '#cba6f7', label: '鸢尾紫' },
-  { value: '#89b4fa', label: '冷静蓝' },
-  { value: '#a6e3a1', label: '轻量绿' },
-];
-
 export const SEARCH_TOAST = '搜索入口还没接线，先直接在会话里描述需求会更快。';
 export const PLUGIN_TOAST = '插件能力还在准备中，当前先走本地工具链。';
 export const AUTOMATION_TOAST = '自动化入口后面再补，现在先把主链路跑通。';
@@ -47,7 +38,6 @@ export const DELETE_MESSAGE_TOAST = '当前版本还不支持从后端历史中�
 export const EMPTY_SEND_TOAST = '先输入内容，或者至少带一个附件。';
 export const SENDING_TOAST = '上一条还在处理中。';
 export const COLLAPSE_TOAST = '侧边栏已折叠。';
-export const THEME_TOAST = '主题颜色已更新。';
 export const SETTINGS_HINTS_ON_TOAST = '已开启本地服务提示。';
 export const SETTINGS_HINTS_OFF_TOAST = '已关闭本地服务提示。';
 export const SETTINGS_SAVED_TOAST = '设置已保存。';

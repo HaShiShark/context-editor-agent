@@ -8,7 +8,6 @@
   "scripts": {
     "start": "if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe web_server.py) else (python web_server.py)",
     "start:web": "if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe web_server.py) else (python web_server.py)",
-    "start:cli": "if exist .venv\\Scripts\\python.exe (.venv\\Scripts\\python.exe main.py) else (python main.py)",
     "dev": "npm run dev:electron",
     "dev:electron": "npm run build:react && electron .",
     "start:electron": "npm run build:react && electron .",
@@ -61,12 +60,11 @@
       "electron/**/*",
       "web_server.py",
       "web_server_modules/**/*",
-      "main.py",
       "requirements.txt",
       ".env.example",
       ".venv/**/*",
       "react_app/dist/**/*",
-      "simple_agent/**/*",
+      "app_agent/**/*",
       "agent_runtime/**/*",
       "package.json"
     ],
@@ -99,3 +97,4 @@
     }
   }
 }
+

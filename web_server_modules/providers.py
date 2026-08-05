@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from typing import Any
@@ -6,8 +6,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlparse, urlunparse
 
-from simple_agent.agent import sanitize_text
-from simple_agent.config import Settings
+from app_agent.session_agent import sanitize_text
+from app_agent.settings import Settings
 
 from .serialization import sanitize_value
 
@@ -140,7 +140,7 @@ def fetch_models_from_provider(
     safe_provider_type = normalize_provider_type(provider_type)
     models_urls = build_provider_models_url_candidates(api_base_url, safe_provider_type)
     if not models_urls:
-        raise ValueError("请先填写有效的 API 地址")
+        raise ValueError("璇峰厛濉啓鏈夋晥鐨?API 鍦板潃")
 
     headers = {
         "Accept": "application/json",
@@ -200,3 +200,4 @@ def clone_provider_settings_payloads(settings: Settings) -> list[dict[str, Any]]
             }
         )
     return payloads
+

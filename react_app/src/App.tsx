@@ -37,7 +37,6 @@ import {
   INITIAL_TOAST_MESSAGE,
   NEW_CHAT_TOAST,
   NEW_PROJECT_TOAST,
-  PAPER_INK_WHITE_THEME,
   PERMISSION_OPTIONS,
   REGENERATE_MISSING_TOAST,
   REGENERATE_TOAST,
@@ -46,8 +45,6 @@ import {
   SETTINGS_HINTS_OFF_TOAST,
   SETTINGS_HINTS_ON_TOAST,
   SETTINGS_SAVED_TOAST,
-  THEME_OPTIONS,
-  THEME_TOAST,
 } from './constants';
 import type {
   ComposerAttachment,
@@ -85,25 +82,12 @@ import {
 } from './utils';
 import { localizeAppDom, localizeUiText, normalizeSupportedLocale } from './i18n';
 
-type AppearanceMode = 'light' | 'dark' | 'system';
+type AppearanceMode = 'light' | 'dark';
 type ResolvedAppearanceMode = 'light' | 'dark';
 
 interface PersistedUiPreferences {
-  theme_color: string;
   theme_mode: AppearanceMode;
-  background_color: string;
-  ui_font: string;
-  code_font: string;
-  ui_font_size: number;
-  code_font_size: number;
-  appearance_contrast: number;
   service_hints_enabled: boolean;
-}
-
-interface RgbColor {
-  r: number;
-  g: number;
-  b: number;
 }
 
 function defaultResponseProviderSettings(): ResponseProviderSettings[] {
@@ -320,23 +304,7 @@ function normalizeBoundedNumber(value: unknown, min: number, max: number, fallba
 }
 
 function normalizeAppearanceMode(value: unknown): AppearanceMode {
-  return value === 'light' || value === 'dark' || value === 'system' ? value : DEFAULT_SETTINGS.theme_mode;
-}
-
-function isHexColorValue(value: unknown): value is string {
-  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
-}
-
-function normalizeThemeColorSetting(value: unknown, fallback: string) {
-  if (value === PAPER_INK_WHITE_THEME || isHexColorValue(value)) {
-    return value;
-  }
-
-  return fallback;
-}
-
-function normalizeHexColorSetting(value: unknown, fallback: string) {
-  return isHexColorValue(value) ? value : fallback;
+  return value === 'light' || value === 'dark' ? value : DEFAULT_SETTINGS.theme_mode;
 }
 
 function normalizeReasoningEffortSetting(value: unknown) {
@@ -389,19 +357,7 @@ function normalizeSettingsPayload(rawSettings: Partial<OpenAISettings> | undefin
     user_locale: normalizeSupportedLocale(nextSettings.user_locale),
     user_timezone: typeof nextSettings.user_timezone === 'string' ? nextSettings.user_timezone : DEFAULT_SETTINGS.user_timezone,
     user_profile: typeof nextSettings.user_profile === 'string' ? nextSettings.user_profile : DEFAULT_SETTINGS.user_profile,
-    theme_color: normalizeThemeColorSetting(nextSettings.theme_color, DEFAULT_SETTINGS.theme_color),
     theme_mode: normalizeAppearanceMode(nextSettings.theme_mode),
-    background_color: normalizeHexColorSetting(nextSettings.background_color, DEFAULT_SETTINGS.background_color),
-    ui_font: typeof nextSettings.ui_font === 'string' && nextSettings.ui_font ? nextSettings.ui_font : DEFAULT_SETTINGS.ui_font,
-    code_font: typeof nextSettings.code_font === 'string' && nextSettings.code_font ? nextSettings.code_font : DEFAULT_SETTINGS.code_font,
-    ui_font_size: normalizeBoundedNumber(nextSettings.ui_font_size, 12, 22, DEFAULT_SETTINGS.ui_font_size),
-    code_font_size: normalizeBoundedNumber(nextSettings.code_font_size, 11, 20, DEFAULT_SETTINGS.code_font_size),
-    appearance_contrast: normalizeBoundedNumber(
-      nextSettings.appearance_contrast,
-      30,
-      80,
-      DEFAULT_SETTINGS.appearance_contrast,
-    ),
     service_hints_enabled: typeof nextSettings.service_hints_enabled === 'boolean'
       ? nextSettings.service_hints_enabled
       : DEFAULT_SETTINGS.service_hints_enabled,
@@ -419,16 +375,16 @@ function normalizeSettingsPayload(rawSettings: Partial<OpenAISettings> | undefin
 
 const DEFAULT_TOOL_SETTINGS: ToolSetting[] = [
   { name: 'parallel_tools', label: 'parallel_tools', description: 'Run multiple enabled tools concurrently and return their results together.', enabled: true },
-  { name: 'shell_command', label: 'Shell 命令', description: '执行一次性 PowerShell 命令，适合检查环境、运行测试和调试。', enabled: true },
-  { name: 'exec_command', label: 'Exec 命令', description: '启动命令并返回输出；长时间运行的进程会给出 process_id。', enabled: true },
-  { name: 'write_stdin', label: '写入 stdin', description: '向 exec_command 启动的仍在运行的进程写入输入。', enabled: true },
-  { name: 'apply_patch', label: 'Apply Patch', description: '使用 Codex 风格 patch 修改、创建、删除或移动工作区文件。', enabled: true },
-  { name: 'list_dir', label: '列出目录', description: '按 Codex list_dir 风格列出目录内容，支持分页和递归深度。', enabled: true },
-  { name: 'read_file', label: '读取文件', description: '读取工作区中的文本文件。', enabled: true },
-  { name: 'view_image', label: '查看图片', description: '读取工作区图片并以 data URL 形式返回给模型。', enabled: true },
-  { name: 'js_repl', label: 'JS REPL', description: '在本地 Node.js kernel 中运行 JavaScript 片段。', enabled: true },
-  { name: 'js_repl_reset', label: '重置 JS REPL', description: '重置本地 JavaScript kernel。', enabled: true },
-  { name: 'get_current_time', label: '当前时间', description: '获取指定时区的当前时间。', enabled: true },
+  { name: 'shell_command', label: 'Shell command', description: 'Run a PowerShell command for local inspection, tests, and debugging.', enabled: true },
+  { name: 'exec_command', label: 'Exec command', description: 'Start a process and stream its output.', enabled: true },
+  { name: 'write_stdin', label: 'Write stdin', description: 'Write input to a running exec process.', enabled: true },
+  { name: 'apply_patch', label: 'Apply Patch', description: 'Apply a Codex style patch to workspace files.', enabled: true },
+  { name: 'list_dir', label: 'List directory', description: 'List workspace directory contents.', enabled: true },
+  { name: 'read_file', label: 'Read file', description: 'Read a text file from the workspace.', enabled: true },
+  { name: 'view_image', label: 'View image', description: 'Read a workspace image and return it to the model.', enabled: true },
+  { name: 'js_repl', label: 'JS REPL', description: 'Run JavaScript in the local Node.js kernel.', enabled: true },
+  { name: 'js_repl_reset', label: 'Reset JS REPL', description: 'Reset the local JavaScript kernel.', enabled: true },
+  { name: 'get_current_time', label: 'Current time', description: 'Get the current time for a timezone.', enabled: true },
 ];
 
 function normalizeToolSettings(rawTools: unknown): ToolSetting[] {
@@ -462,8 +418,8 @@ const DEFAULT_SETTINGS: OpenAISettings = {
   openai_base_url: '',
   max_tool_rounds: 999999,
   assistant_name: 'Hanako',
-  assistant_greeting: '对话开始时先接住情绪，再推进任务，不要一上来就像客服一样念模板。',
-  assistant_prompt: '你是一个温柔、可靠、说人话的助手。先理解我的真实意图，再给出清晰直接的建议；少一些官话，多一些陪我一起把事情做完的感觉。',
+  assistant_greeting: '先接住上下文，再推进任务。',
+  assistant_prompt: '你是一个温和、可靠、说人话的助手。先理解真实意图，再给出清晰直接的建议。',
   temperature: null,
   top_p: null,
   context_message_limit: null,
@@ -471,15 +427,8 @@ const DEFAULT_SETTINGS: OpenAISettings = {
   user_name: '小宝',
   user_locale: 'zh-CN',
   user_timezone: 'Asia/Shanghai',
-  user_profile: '希望它更像一个陪我做事的搭档，不要太客服腔。帮我收住情绪，也帮我推进执行。',
-  theme_color: THEME_OPTIONS[0].value,
-  theme_mode: 'dark',
-  background_color: '#111111',
-  ui_font: 'Noto Serif SC',
-  code_font: 'JetBrains Mono',
-  ui_font_size: 16,
-  code_font_size: 14,
-  appearance_contrast: 45,
+  user_profile: '希望助手像一个一起做事的搭档，少一点客套，多一点推进。',
+  theme_mode: 'light',
   service_hints_enabled: true,
     has_api_key: false,
     api_key_preview: '',
@@ -794,14 +743,7 @@ function buildSettingsSavePayload(
 
 function uiPreferencesFromSettings(settings: OpenAISettings): PersistedUiPreferences {
   return {
-    theme_color: settings.theme_color,
     theme_mode: settings.theme_mode,
-    background_color: settings.background_color,
-    ui_font: settings.ui_font,
-    code_font: settings.code_font,
-    ui_font_size: settings.ui_font_size,
-    code_font_size: settings.code_font_size,
-    appearance_contrast: settings.appearance_contrast,
     service_hints_enabled: settings.service_hints_enabled,
   };
 }
@@ -1012,244 +954,78 @@ function scrollMessageListToBottom(messageList: HTMLDivElement) {
   messageList.scrollTop = messageList.scrollHeight;
 }
 
-function resolveThemeAccent(themeColor: string) {
-  if (themeColor === PAPER_INK_WHITE_THEME) {
-    return '#ffffff';
-  }
+const THEME_TOKENS: Record<ResolvedAppearanceMode, Record<string, string>> = {
+  light: {
+    '--app-bg-color': '#f8f5f1',
+    '--bg-main': '#f8f5f1',
+    '--bg-sidebar': '#eee8df',
+    '--bg-input': '#fffaf4',
+    '--bg-input-hover': '#f4eee7',
+    '--bg-capsule': '#ece3d9',
+    '--surface-bg': '#fffaf4',
+    '--surface-bg-strong': '#f2ebe3',
+    '--surface-bg-elevated': '#fffdf9',
+    '--text-primary': '#2a211d',
+    '--text-secondary': '#745d53',
+    '--text-muted': 'rgba(42, 33, 29, 0.56)',
+    '--text-primary-rgb': '42, 33, 29',
+    '--text-secondary-rgb': '116, 93, 83',
+    '--border-color': '#d9c8be',
+    '--border-subtle': 'rgba(127, 95, 80, 0.18)',
+    '--item-hover': 'rgba(184, 105, 78, 0.1)',
+    '--item-active': 'rgba(184, 105, 78, 0.16)',
+    '--scrollbar-thumb': 'rgba(127, 95, 80, 0.24)',
+    '--scrollbar-thumb-hover': 'rgba(127, 95, 80, 0.36)',
+    '--shadow-color': 'rgba(96, 61, 45, 0.16)',
+    '--assistant-theme': '#b8694e',
+    '--assistant-theme-rgb': '184, 105, 78',
+    '--theme-surface-is-light': '1',
+  },
+  dark: {
+    '--app-bg-color': '#211c18',
+    '--bg-main': '#211c18',
+    '--bg-sidebar': '#181410',
+    '--bg-input': '#2d261f',
+    '--bg-input-hover': '#362d25',
+    '--bg-capsule': '#3a3028',
+    '--surface-bg': '#2a241f',
+    '--surface-bg-strong': '#352d26',
+    '--surface-bg-elevated': '#3d332b',
+    '--text-primary': '#f8efe7',
+    '--text-secondary': '#c8b7aa',
+    '--text-muted': 'rgba(248, 239, 231, 0.5)',
+    '--text-primary-rgb': '248, 239, 231',
+    '--text-secondary-rgb': '200, 183, 170',
+    '--border-color': '#4b3d32',
+    '--border-subtle': 'rgba(239, 222, 208, 0.12)',
+    '--item-hover': 'rgba(239, 222, 208, 0.08)',
+    '--item-active': 'rgba(239, 222, 208, 0.13)',
+    '--scrollbar-thumb': 'rgba(239, 222, 208, 0.18)',
+    '--scrollbar-thumb-hover': 'rgba(239, 222, 208, 0.3)',
+    '--shadow-color': 'rgba(8, 5, 3, 0.42)',
+    '--assistant-theme': '#d58b6e',
+    '--assistant-theme-rgb': '213, 139, 110',
+    '--theme-surface-is-light': '0',
+  },
+};
 
-  return themeColor;
-}
-
-function parseHexColor(value: string): RgbColor | null {
-  const match = /^#?([0-9a-f]{6})$/i.exec(value.trim());
-
-  if (!match) {
-    return null;
-  }
-
-  const hex = match[1];
-
-  return {
-    r: Number.parseInt(hex.slice(0, 2), 16),
-    g: Number.parseInt(hex.slice(2, 4), 16),
-    b: Number.parseInt(hex.slice(4, 6), 16),
-  };
-}
-
-function normalizeHexColor(value: string, fallback: string) {
-  const parsed = parseHexColor(value);
-
-  if (!parsed) {
-    return fallback;
-  }
-
-  return rgbToHex(parsed);
-}
-
-function rgbToHex(color: RgbColor) {
-  const channelToHex = (channel: number) => Math.round(Math.min(255, Math.max(0, channel)))
-    .toString(16)
-    .padStart(2, '0');
-
-  return `#${channelToHex(color.r)}${channelToHex(color.g)}${channelToHex(color.b)}`;
-}
-
-function rgbToCss(color: RgbColor) {
-  return `${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)}`;
-}
-
-function mixColors(from: RgbColor, to: RgbColor, amount: number): RgbColor {
-  const ratio = Math.min(1, Math.max(0, amount));
-
-  return {
-    r: from.r + (to.r - from.r) * ratio,
-    g: from.g + (to.g - from.g) * ratio,
-    b: from.b + (to.b - from.b) * ratio,
-  };
-}
-
-function getRelativeLuminance(color: RgbColor) {
-  const toLinear = (channel: number) => {
-    const value = channel / 255;
-    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  };
-
-  return 0.2126 * toLinear(color.r) + 0.7152 * toLinear(color.g) + 0.0722 * toLinear(color.b);
-}
-
-function resolveThemeAccentRgb(themeColor: string) {
-  const accent = resolveThemeAccent(themeColor);
-  const parsedAccent = parseHexColor(accent);
-
-  return parsedAccent ? rgbToCss(parsedAccent) : '203, 166, 247';
-}
-
-const DEFAULT_DARK_BACKGROUND_COLOR = '#111111';
-const DEFAULT_LIGHT_BACKGROUND_COLOR = '#f3f1ea';
-const DEFAULT_BACKGROUND_COLOR = DEFAULT_DARK_BACKGROUND_COLOR;
-const DEFAULT_UI_FONT = 'Noto Serif SC';
-const DEFAULT_CODE_FONT = 'JetBrains Mono';
-const DEFAULT_UI_FONT_SIZE = 16;
-const DEFAULT_CODE_FONT_SIZE = 14;
-const DEFAULT_APPEARANCE_CONTRAST = 45;
-
-const DEFAULT_DARK_BACKGROUNDS = new Set(['#000000', '#080808', '#111111', '#161616']);
-const DEFAULT_LIGHT_BACKGROUNDS = new Set(['#ffffff', '#f7f5ee', '#f3f1ea', '#f1f0ea', '#ebe9e1']);
-
-function getSystemAppearanceMode(): ResolvedAppearanceMode {
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) {
-    return 'light';
-  }
-
-  return 'dark';
-}
-
-function shouldSwapThemeDefaultBackground(currentBackground: string, nextMode: ResolvedAppearanceMode) {
-  const normalizedBackground = normalizeHexColor(currentBackground, DEFAULT_BACKGROUND_COLOR);
-
-  if (nextMode === 'light') {
-    return DEFAULT_DARK_BACKGROUNDS.has(normalizedBackground);
-  }
-
-  return DEFAULT_LIGHT_BACKGROUNDS.has(normalizedBackground);
-}
-
-function deriveAppearanceTokens(backgroundColor: string, resolvedMode: ResolvedAppearanceMode) {
-  const normalizedBackground = normalizeHexColor(backgroundColor, DEFAULT_BACKGROUND_COLOR);
-  const background = parseHexColor(normalizedBackground) || parseHexColor(DEFAULT_BACKGROUND_COLOR)!;
-  const white = { r: 255, g: 255, b: 255 };
-  const black = { r: 0, g: 0, b: 0 };
-  const luminance = getRelativeLuminance(background);
-  const surfaceIsLight = luminance >= 0.52;
-  const textBase = surfaceIsLight ? { r: 24, g: 24, b: 24 } : { r: 248, g: 248, b: 248 };
-  const mutedBase = mixColors(textBase, background, surfaceIsLight ? 0.42 : 0.34);
-  const faintBase = mixColors(textBase, background, surfaceIsLight ? 0.62 : 0.55);
-  const panel = surfaceIsLight
-    ? mixColors(background, white, resolvedMode === 'light' ? 0.5 : 0.28)
-    : mixColors(background, white, 0.06);
-  const panelStrong = surfaceIsLight ? mixColors(background, white, 0.72) : mixColors(background, white, 0.095);
-  const sidebar = surfaceIsLight
-    ? mixColors(background, black, resolvedMode === 'light' ? 0.065 : 0.12)
-    : mixColors(background, black, 0.18);
-  const input = surfaceIsLight ? mixColors(background, white, 0.72) : mixColors(background, white, 0.08);
-  const inputHover = surfaceIsLight ? mixColors(background, white, 0.86) : mixColors(background, white, 0.13);
-  const capsule = surfaceIsLight ? mixColors(background, black, 0.08) : mixColors(background, white, 0.16);
-  const borderBase = surfaceIsLight ? mixColors(background, black, 0.16) : mixColors(background, white, 0.12);
-  const borderSubtle = surfaceIsLight ? mixColors(background, black, 0.1) : mixColors(background, white, 0.075);
-  const textCss = rgbToCss(textBase);
-  const shadowAlpha = surfaceIsLight ? '0.16' : '0.34';
-
-  return {
-    '--app-bg-color': normalizedBackground,
-    '--bg-main': normalizedBackground,
-    '--bg-sidebar': rgbToHex(sidebar),
-    '--bg-input': rgbToHex(input),
-    '--bg-input-hover': rgbToHex(inputHover),
-    '--bg-capsule': rgbToHex(capsule),
-    '--surface-bg': rgbToHex(panel),
-    '--surface-bg-strong': rgbToHex(panelStrong),
-    '--surface-bg-elevated': rgbToHex(panelStrong),
-    '--text-primary': rgbToHex(textBase),
-    '--text-secondary': rgbToHex(mutedBase),
-    '--text-muted': rgbToHex(faintBase),
-    '--text-primary-rgb': textCss,
-    '--text-secondary-rgb': rgbToCss(mutedBase),
-    '--border-color': rgbToHex(borderBase),
-    '--border-subtle': rgbToHex(borderSubtle),
-    '--item-hover': `rgba(${textCss}, ${surfaceIsLight ? 0.07 : 0.08})`,
-    '--item-active': `rgba(${textCss}, ${surfaceIsLight ? 0.11 : 0.12})`,
-    '--scrollbar-thumb': `rgba(${textCss}, ${surfaceIsLight ? 0.16 : 0.18})`,
-    '--scrollbar-thumb-hover': `rgba(${textCss}, ${surfaceIsLight ? 0.24 : 0.28})`,
-    '--shadow-color': `rgba(0, 0, 0, ${shadowAlpha})`,
-    '--theme-surface-is-light': surfaceIsLight ? '1' : '0',
-  };
-}
-
-const UI_FONT_CANDIDATES = [
-  'Noto Serif SC',
-  'Noto Sans SC',
-  'Microsoft YaHei',
-  'Microsoft JhengHei',
-  'SimSun',
-  'SimHei',
-  'KaiTi',
-  'FangSong',
-  'Source Han Sans SC',
-  'Source Han Serif SC',
-  'PingFang SC',
-  'Heiti SC',
-  'Songti SC',
-  'Inter',
-  'Arial',
-  'Segoe UI',
-];
-
-const CODE_FONT_CANDIDATES = [
-  'JetBrains Mono',
-  'Fira Code',
-  'Cascadia Code',
-  'Consolas',
-  'Source Code Pro',
-  'SFMono-Regular',
-  'Menlo',
-  'Monaco',
-  'Courier New',
-];
-
-function quoteFontName(fontName: string) {
-  if (/^(serif|sans-serif|monospace|system-ui|inherit)$/i.test(fontName)) {
-    return fontName;
-  }
-
-  return `"${fontName.replace(/"/g, '\\"')}"`;
-}
-
-function buildUiFontStack(fontName: string) {
-  return `${quoteFontName(fontName)}, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
-}
-
-function buildCodeFontStack(fontName: string) {
-  return `${quoteFontName(fontName)}, ui-monospace, SFMono-Regular, Consolas, monospace`;
-}
-
-function detectInstalledFonts(candidates: string[]) {
-  if (typeof document === 'undefined') {
-    return candidates;
-  }
-
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-
-  if (!context) {
-    return candidates;
-  }
-
-  const sample = 'mmmmmmmmmmlli中文字体测试0123456789';
-  const bases = ['serif', 'sans-serif', 'monospace'];
-  const baseWidths = new Map<string, number>();
-
-  bases.forEach((base) => {
-    context.font = `72px ${base}`;
-    baseWidths.set(base, context.measureText(sample).width);
+function applyThemeMode(root: HTMLElement, mode: ResolvedAppearanceMode) {
+  root.dataset.themeMode = mode;
+  root.dataset.themePreference = mode;
+  root.style.setProperty('--ui-font-family', '"Noto Serif SC", Georgia, "Times New Roman", serif');
+  root.style.setProperty('--code-font-family', '"JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace');
+  root.style.setProperty('--ui-font-size', '15px');
+  root.style.setProperty('--code-font-size', '14px');
+  root.style.setProperty('--app-contrast-filter', 'contrast(100%)');
+  Object.entries(THEME_TOKENS[mode]).forEach(([property, value]) => {
+    root.style.setProperty(property, value);
   });
-
-  return candidates.filter((fontName) =>
-    bases.some((base) => {
-      context.font = `72px ${quoteFontName(fontName)}, ${base}`;
-      return Math.abs(context.measureText(sample).width - (baseWidths.get(base) || 0)) > 0.1;
-    }),
-  );
-}
-
-function mergeFontOptions(defaultFont: string, detectedFonts: string[], fallbackFonts: string[]) {
-  const fonts = detectedFonts.length ? detectedFonts : fallbackFonts;
-  return Array.from(new Set([defaultFont, ...fonts]));
 }
 
 async function fileToComposerAttachment(file: File): Promise<ComposerAttachment> {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`读取附件失败：${file.name}`));
+    reader.onerror = () => reject(new Error('Failed to read attachment: ' + file.name));
     reader.onload = () => resolve(String(reader.result || ''));
     reader.readAsDataURL(file);
   });
@@ -1294,17 +1070,7 @@ export default function App() {
   const [openDropdown, setOpenDropdown] = useState<DropdownId>(null);
   const [currentPermission, setCurrentPermission] = useState<PermissionOption>(PERMISSION_OPTIONS[1]);
   const [serviceHintsEnabled, setServiceHintsEnabled] = useState(true);
-  const [themeColor, setThemeColor] = useState(THEME_OPTIONS[0].value);
-  const [themeMode, setThemeMode] = useState<AppearanceMode>('dark');
-  const [systemAppearanceMode, setSystemAppearanceMode] = useState<ResolvedAppearanceMode>(getSystemAppearanceMode);
-  const [backgroundColor, setBackgroundColor] = useState(DEFAULT_BACKGROUND_COLOR);
-  const [uiFont, setUiFont] = useState(DEFAULT_UI_FONT);
-  const [codeFont, setCodeFont] = useState(DEFAULT_CODE_FONT);
-  const [uiFontSize, setUiFontSize] = useState(DEFAULT_UI_FONT_SIZE);
-  const [codeFontSize, setCodeFontSize] = useState(DEFAULT_CODE_FONT_SIZE);
-  const [appearanceContrast, setAppearanceContrast] = useState(DEFAULT_APPEARANCE_CONTRAST);
-  const [availableUiFonts, setAvailableUiFonts] = useState(UI_FONT_CANDIDATES);
-  const [availableCodeFonts, setAvailableCodeFonts] = useState(CODE_FONT_CANDIDATES);
+  const [themeMode, setThemeMode] = useState<AppearanceMode>('light');
   const [userSidebarCollapsed, setUserSidebarCollapsed] = useState(false);
   const [contextMap, setContextMap] = useState<ContextMapState>({
     stage: 0,
@@ -1329,7 +1095,7 @@ export default function App() {
       }
       contextMapVisibleRef.current = true;
     } else if (prev !== 0 && contextMapVisibleRef.current) {
-      // Stage just became 0 — keep mounted for exit animation, then unmount
+      // Stage just became 0; keep mounted for exit animation, then unmount.
       contextMapUnmountTimerRef.current = setTimeout(() => {
         contextMapVisibleRef.current = false;
         contextMapUnmountTimerRef.current = null;
@@ -1358,7 +1124,7 @@ export default function App() {
   const [fetchingProviderId, setFetchingProviderId] = useState('');
 
   const isSidebarCollapsed = userSidebarCollapsed || contextMap.stage === 2;
-  const resolvedThemeMode = themeMode === 'system' ? systemAppearanceMode : themeMode;
+  const resolvedThemeMode = themeMode;
   const uiLocale = normalizeSupportedLocale(settingsDraft.user_locale);
 
   const [toastState, setToastState] = useState({
@@ -1400,13 +1166,13 @@ export default function App() {
 
   const headerTitle = sidebarMode === 'projects'
     ? currentSessionMeta?.session?.title
-      ? `${currentProject?.title || '我的项目'} · ${currentSessionMeta.session.title}`
+      ? `${currentProject?.title || '我的项目'} / ${currentSessionMeta.session.title}`
       : currentProject?.title || '我的项目'
     : currentSessionMeta?.session?.title || '我的对话';
 
   const welcomeText = sidebarMode === 'projects'
     ? `What Should We Work In ${projectName || 'hashcode'}?`
-    : 'Hello！HaShiShark';
+    : '你好，HaShiShark';
 
   const welcomeAnimationKey = [
     view,
@@ -1643,19 +1409,7 @@ export default function App() {
 
   function currentUiPreferences(): PersistedUiPreferences {
     return {
-      theme_color: normalizeThemeColorSetting(themeColor, DEFAULT_SETTINGS.theme_color),
       theme_mode: themeMode,
-      background_color: normalizeHexColor(backgroundColor, DEFAULT_BACKGROUND_COLOR),
-      ui_font: uiFont || DEFAULT_UI_FONT,
-      code_font: codeFont || DEFAULT_CODE_FONT,
-      ui_font_size: normalizeBoundedNumber(uiFontSize, 12, 22, DEFAULT_UI_FONT_SIZE),
-      code_font_size: normalizeBoundedNumber(codeFontSize, 11, 20, DEFAULT_CODE_FONT_SIZE),
-      appearance_contrast: normalizeBoundedNumber(
-        appearanceContrast,
-        30,
-        80,
-        DEFAULT_APPEARANCE_CONTRAST,
-      ),
       service_hints_enabled: serviceHintsEnabled,
     };
   }
@@ -1749,14 +1503,7 @@ export default function App() {
     settingsInitializedRef.current = true;
     setSettingsDraft(nextDraft);
     setServiceHintsEnabled(nextPreferences.service_hints_enabled);
-    setThemeColor(nextPreferences.theme_color);
     setThemeMode(nextPreferences.theme_mode);
-    setBackgroundColor(nextPreferences.background_color);
-    setUiFont(nextPreferences.ui_font);
-    setCodeFont(nextPreferences.code_font);
-    setUiFontSize(nextPreferences.ui_font_size);
-    setCodeFontSize(nextPreferences.code_font_size);
-    setAppearanceContrast(nextPreferences.appearance_contrast);
     setModels((previous) => {
       const merged = [currentModelRef.current, ...availableModels, ...previous].filter(Boolean);
       return Array.from(new Set(merged));
@@ -2013,14 +1760,7 @@ export default function App() {
           settingsDraftRef.current = nextSettingsDraft;
           setSettingsDraft(nextSettingsDraft);
           setServiceHintsEnabled(nextPreferences.service_hints_enabled);
-          setThemeColor(nextPreferences.theme_color);
           setThemeMode(nextPreferences.theme_mode);
-          setBackgroundColor(nextPreferences.background_color);
-          setUiFont(nextPreferences.ui_font);
-          setCodeFont(nextPreferences.code_font);
-          setUiFontSize(nextPreferences.ui_font_size);
-          setCodeFontSize(nextPreferences.code_font_size);
-          setAppearanceContrast(nextPreferences.appearance_contrast);
           settingsInitializedRef.current = true;
         });
       } catch (error) {
@@ -2073,18 +1813,7 @@ export default function App() {
         window.clearTimeout(settingsAutosaveTimerRef.current);
       }
     };
-  }, [
-    appearanceContrast,
-    backgroundColor,
-    codeFont,
-    codeFontSize,
-    serviceHintsEnabled,
-    settingsDraft,
-    themeColor,
-    themeMode,
-    uiFont,
-    uiFontSize,
-  ]);
+  }, [serviceHintsEnabled, settingsDraft, themeMode]);
 
   useEffect(() => {
     if (toastTimerRef.current) {
@@ -2107,53 +1836,9 @@ export default function App() {
   }, [toastState.seq, toastState.visible]);
 
   useLayoutEffect(() => {
-    document.documentElement.style.setProperty('--assistant-theme', resolveThemeAccent(themeColor));
-    document.documentElement.style.setProperty('--assistant-theme-rgb', resolveThemeAccentRgb(themeColor));
-  }, [themeColor]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) {
-      return;
-    }
-
-    const media = window.matchMedia('(prefers-color-scheme: light)');
-    const syncSystemAppearanceMode = () => setSystemAppearanceMode(media.matches ? 'light' : 'dark');
-
-    syncSystemAppearanceMode();
-    media.addEventListener?.('change', syncSystemAppearanceMode);
-
-    return () => {
-      media.removeEventListener?.('change', syncSystemAppearanceMode);
-    };
-  }, []);
-
-  useLayoutEffect(() => {
     const root = document.documentElement;
-    const appearanceTokens = deriveAppearanceTokens(backgroundColor, resolvedThemeMode);
-
-    root.dataset.themeMode = resolvedThemeMode;
-    root.dataset.themePreference = themeMode;
-    Object.entries(appearanceTokens).forEach(([property, value]) => {
-      root.style.setProperty(property, value);
-    });
-    root.style.setProperty('--ui-font-size', `${uiFontSize}px`);
-    root.style.setProperty('--code-font-size', `${codeFontSize}px`);
-    root.style.setProperty('--app-contrast-filter', `contrast(${Math.max(80, Math.min(130, appearanceContrast + 55))}%)`);
-  }, [appearanceContrast, backgroundColor, codeFontSize, resolvedThemeMode, themeMode, uiFontSize]);
-
-  useLayoutEffect(() => {
-    const root = document.documentElement;
-
-    root.style.setProperty('--ui-font-family', buildUiFontStack(uiFont));
-    root.style.setProperty('--code-font-family', buildCodeFontStack(codeFont));
-  }, [uiFont, codeFont]);
-
-  useEffect(() => {
-    setAvailableUiFonts(mergeFontOptions(DEFAULT_UI_FONT, detectInstalledFonts(UI_FONT_CANDIDATES), UI_FONT_CANDIDATES));
-    setAvailableCodeFonts(
-      mergeFontOptions(DEFAULT_CODE_FONT, detectInstalledFonts(CODE_FONT_CANDIDATES), CODE_FONT_CANDIDATES),
-    );
-  }, []);
+    applyThemeMode(root, resolvedThemeMode);
+  }, [resolvedThemeMode]);
 
   useEffect(() => {
     document.body.classList.toggle('sidebar-collapsed', isSidebarCollapsed);
@@ -2373,7 +2058,7 @@ export default function App() {
   async function handleDeleteSession(sessionId: string) {
     const meta = getSessionMeta(projects, chatSessions, sessionId);
     if (!meta) {
-      showToast('没找到这条对话。');
+      showToast('没有找到这条对话。');
       return;
     }
 
@@ -2430,7 +2115,7 @@ export default function App() {
 
   async function handleDeleteProject(project: ProjectSummary) {
     const confirmed = window.confirm(
-      localizeUiText(`移除项目“${project.title}”会删除它下面的项目对话，确定继续吗？`, uiLocale),
+      localizeUiText('Delete project ' + project.title + ' and its sessions?', uiLocale),
     );
     if (!confirmed) {
       return;
@@ -2500,7 +2185,7 @@ export default function App() {
       setView('chat');
       window.focus();
       focusComposer();
-      showToast('项目已移除。');
+      showToast('Project deleted.');
     } catch (error) {
       showToast(getThrownMessage(error));
     }
@@ -2511,14 +2196,14 @@ export default function App() {
       const data = await pinProjectRequest(project.id);
       applySidebarPayload(data, project.id);
       setCurrentProjectId(project.id);
-      showToast('项目已置顶。');
+      showToast('Project pinned.');
     } catch (error) {
       showToast(getThrownMessage(error));
     }
   }
 
   async function handleRenameProject(project: ProjectSummary) {
-    const nextTitle = window.prompt(localizeUiText('重命名项目', uiLocale), project.title)?.trim();
+    const nextTitle = window.prompt(localizeUiText('Rename project', uiLocale), project.title)?.trim();
     if (!nextTitle || nextTitle === project.title) {
       return;
     }
@@ -2527,7 +2212,7 @@ export default function App() {
       const data = await renameProjectRequest(project.id, nextTitle);
       applySidebarPayload(data, project.id);
       setCurrentProjectId(project.id);
-      showToast('项目已重命名。');
+      showToast('Project renamed.');
     } catch (error) {
       showToast(getThrownMessage(error));
     }
@@ -2536,18 +2221,18 @@ export default function App() {
   async function handleOpenProjectParent(project: ProjectSummary) {
     const rootPath = project.root_path || '';
     if (!rootPath) {
-      showToast('这个项目没有绑定本地文件夹。');
+      showToast('This project has no local folder.');
       return;
     }
 
     if (!window.electronAPI?.openProjectParentFolder) {
-      showToast('需要在桌面端打开资源管理器。');
+      showToast('Open this from the desktop app.');
       return;
     }
 
     const result = await window.electronAPI.openProjectParentFolder(rootPath);
     if (result.ok) {
-      showToast('已打开项目所在父文件夹。');
+      showToast('Opened project folder.');
       return;
     }
     showToast(String(result.error));
@@ -2560,7 +2245,7 @@ export default function App() {
       return;
     }
 
-    const confirmed = window.confirm(localizeUiText(`归档项目“${project.title}”下的 ${sessionCount} 条对话？`, uiLocale));
+    const confirmed = window.confirm(localizeUiText('Archive ' + sessionCount + ' sessions in ' + project.title + '?', uiLocale));
     if (!confirmed) {
       return;
     }
@@ -2581,7 +2266,7 @@ export default function App() {
       }
       abortSessionRequests(archivedSessionIds);
 
-      showToast('项目对话已归档。');
+      showToast('Project sessions archived.');
     } catch (error) {
       showToast(getThrownMessage(error));
     }
@@ -2590,7 +2275,7 @@ export default function App() {
   function handleSwitchSession(sessionId: string) {
     const meta = getSessionMeta(projects, chatSessions, sessionId);
     if (!meta) {
-      showToast('没找到这条对话。');
+      showToast('Session not found.');
       return;
     }
 
@@ -2762,7 +2447,7 @@ export default function App() {
           return next;
         });
         if (Array.isArray(response.tool_events) && response.tool_events.length) {
-          showToast(`本轮调用了 ${response.tool_events.length} 个工具。`);
+          showToast('Tool calls: ' + response.tool_events.length + '.');
         }
         return;
       }
@@ -2775,7 +2460,7 @@ export default function App() {
             updatePendingAssistantMessage(sessionId, (lastMessage) => ({
               ...lastMessage,
               role: 'assistant',
-              text: isReasoningDelta ? lastMessage.text : `${lastMessage.text}${event.delta}`,
+              text: isReasoningDelta ? lastMessage.text : lastMessage.text + event.delta,
               blocks: isReasoningDelta
                 ? appendReasoningDeltaToBlocks(lastMessage.blocks, event.delta)
                 : appendDeltaToBlocks(lastMessage.blocks, event.delta),
@@ -2899,7 +2584,7 @@ export default function App() {
           });
 
           if (Array.isArray(event.tool_events) && event.tool_events.length) {
-            showToast(`本轮调用了 ${event.tool_events.length} 个工具。`);
+            showToast('Tool calls: ' + event.tool_events.length + '.');
           }
         },
         {
@@ -2912,13 +2597,13 @@ export default function App() {
       }
 
       if (!streamCompleted) {
-        throw new Error('流式响应意外中断');
+        throw new Error('Stream interrupted.');
       }
     } catch (error) {
       if (sessionId && (stopRequestedSessionIdsRef.current.has(sessionId) || isAbortError(error))) {
         await stopRequestPromisesRef.current[sessionId];
         finalizePendingAssistantMessage(sessionId, message);
-        showToast('已停止本次回复。');
+        showToast('Stopped this response.');
         return;
       }
 
@@ -3068,7 +2753,7 @@ export default function App() {
 
   async function handleDeleteMessage(messageIndex: number) {
     if (!currentSessionId) {
-      showToast('没找到当前会话。');
+      showToast('No active session found.');
       return;
     }
 
@@ -3076,7 +2761,7 @@ export default function App() {
     const history = conversations[sessionId] || [];
     const targetMessage = history[messageIndex];
     if (!targetMessage) {
-      showToast('没找到这条消息。');
+      showToast('Message not found.');
       return;
     }
 
@@ -3090,7 +2775,7 @@ export default function App() {
         [sessionId]: normalizeConversation(response.conversation),
       }));
       updateContextInputMapFromTranscript(sessionId, response.context_input);
-      showToast('这条消息已经删掉了。');
+      showToast('Message deleted.');
     } catch (error) {
       showToast(getThrownMessage(error));
     }
@@ -3149,7 +2834,7 @@ export default function App() {
   function handlePermissionSelect(option: PermissionOption) {
     setCurrentPermission(option);
     setOpenDropdown(null);
-    showToast(option.toastMessage || `已切换到 ${option.label}。`);
+    showToast(option.toastMessage || 'Permission: ' + option.label + '.');
   }
 
   function handleOpenModelPicker() {
@@ -3201,7 +2886,7 @@ export default function App() {
         Array.from(new Set([modelId, ...targetProvider.models.map((item) => item.id), ...previous].filter(Boolean))),
       );
     });
-    showToast(`模型已切换到 ${modelId}。`);
+    showToast('Model: ' + modelId + '.');
     void saveSettingsRequest(savePayload)
       .then((response) => {
         if (modelSelectionRequestIdRef.current !== requestId) {
@@ -3243,7 +2928,7 @@ export default function App() {
       setCurrentReasoning(option.value);
       setOpenDropdown(null);
     });
-    showToast(`推理强度已切换到 ${option.label}。`);
+    showToast('Reasoning: ' + option.label + '.');
     void saveSettingsRequest(
       buildSettingsSavePayload(settingsDraftRef.current, {
         defaultReasoningEffort: option.value,
@@ -3285,26 +2970,8 @@ export default function App() {
     setCurrentSessionId('');
   }
 
-  function handleThemeChange(value: string) {
-    setThemeColor(value);
-    showToast(THEME_TOAST);
-  }
-
   function handleThemeModeChange(nextMode: AppearanceMode) {
-    const nextResolvedMode = nextMode === 'system' ? getSystemAppearanceMode() : nextMode;
-
     setThemeMode(nextMode);
-    setBackgroundColor((previousBackground) => {
-      if (!shouldSwapThemeDefaultBackground(previousBackground, nextResolvedMode)) {
-        return previousBackground;
-      }
-
-      return nextResolvedMode === 'light' ? DEFAULT_LIGHT_BACKGROUND_COLOR : DEFAULT_DARK_BACKGROUND_COLOR;
-    });
-  }
-
-  function handleBackgroundColorChange(value: string) {
-    setBackgroundColor((previousBackground) => normalizeHexColor(value, previousBackground));
   }
 
   function handleToggleServiceHints(enabled: boolean) {
@@ -3325,7 +2992,7 @@ export default function App() {
       return;
     }
 
-    const targetNode = messageList.querySelector<HTMLElement>(`[data-message-index="${messageIndex}"]`);
+    const targetNode = messageList.querySelector<HTMLElement>('[data-message-index="' + messageIndex + '"]');
     if (!targetNode) {
       return;
     }
@@ -3340,7 +3007,7 @@ export default function App() {
     <div className="app-container">
       <Toast message={toastState.message} visible={toastState.visible} />
 
-      <div className={`title-bar ${contextMap.stage === 2 ? 'main-blurred' : ''}`}>
+      <div className={'title-bar ' + (contextMap.stage === 2 ? 'main-blurred' : '')}>
         <div className="title-bar-left">
           <button className="sidebar-toggle" onClick={handleToggleSidebar} title="切换侧栏">
             <i className="ph-light ph-sidebar-simple" />
@@ -3370,22 +3037,13 @@ export default function App() {
             availableModels={models}
             fetchingProviderId={fetchingProviderId}
             isSaving={isSavingSettings}
+            isSidebarResizing={isResizingLeft}
             openAISettings={openAISettings}
             savingProviderId={savingProviderId}
             settingsDraft={settingsDraft}
             serviceHintsEnabled={serviceHintsEnabled}
-            appearanceContrast={appearanceContrast}
-            backgroundColor={backgroundColor}
-            codeFontSize={codeFontSize}
-            codeFont={codeFont}
             resolvedThemeMode={resolvedThemeMode}
-            themeColor={themeColor}
             themeMode={themeMode}
-            themeOptions={THEME_OPTIONS}
-            uiFontSize={uiFontSize}
-            uiFont={uiFont}
-            availableCodeFonts={availableCodeFonts}
-            availableUiFonts={availableUiFonts}
             view={view}
             onClearApiKey={() => {
               void handleClearApiKey();
@@ -3405,16 +3063,10 @@ export default function App() {
             onSaveOpenAISettings={() => {
               void handleSaveOpenAISettings();
             }}
-            onAppearanceContrastChange={setAppearanceContrast}
-            onBackgroundColorChange={handleBackgroundColorChange}
-            onCodeFontSizeChange={setCodeFontSize}
-            onCodeFontChange={setCodeFont}
+            onSidebarResizeStart={startResizingLeft}
             onSwitchView={setView}
-            onThemeChange={handleThemeChange}
             onThemeModeChange={handleThemeModeChange}
             onToggleServiceHints={handleToggleServiceHints}
-            onUiFontSizeChange={setUiFontSize}
-            onUiFontChange={setUiFont}
           />
         ) : (
           <>
@@ -3466,9 +3118,9 @@ export default function App() {
               onToggleMode={handleToggleSidebarMode}
             />
 
-            <div className={`resizer resizer-left ${isResizingLeft ? 'dragging' : ''}`} onMouseDown={startResizingLeft} />
+            <div className={'resizer resizer-left ' + (isResizingLeft ? 'dragging' : '')} onMouseDown={startResizingLeft} />
 
-            <main className={`view-container ${contextMap.stage === 2 ? 'main-blurred' : ''}`}>
+            <main className={'view-container ' + (contextMap.stage === 2 ? 'main-blurred' : '')}>
               <ChatView
                 attachments={composerAttachments}
                 composerValue={composerValue}
@@ -3525,7 +3177,7 @@ export default function App() {
             />
 
             <div
-              className={`resizer resizer-right ${isResizingRight ? 'dragging' : ''} ${contextMap.stage === 0 ? 'hidden' : ''}`}
+              className={'resizer resizer-right ' + (isResizingRight ? 'dragging ' : '') + (contextMap.stage === 0 ? 'hidden' : '')}
               onMouseDown={startResizingRight}
             />
 

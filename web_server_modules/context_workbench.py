@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -13,8 +13,8 @@ try:
 except ImportError:  # pragma: no cover - dependency fallback for partially installed environments
     tiktoken = None
 
-from simple_agent.agent import sanitize_text
-from simple_agent.tools import ToolExecution
+from app_agent.session_agent import sanitize_text
+from app_agent.tools import ToolExecution
 
 from .attachments import normalize_attachment_records
 from .serialization import sanitize_value
@@ -28,7 +28,6 @@ from .transcript import (
     normalize_provider_items,
     normalize_transcript,
     provider_item_detail,
-    replace_provider_message_text,
 )
 
 
@@ -69,39 +68,6 @@ def provider_items_tool_token_count(items: list[dict[str, Any]]) -> int:
             continue
         total += estimate_provider_item_token_count(item)
     return total
-
-
-def context_workbench_suggestions_payload(session: SessionState) -> dict[str, object]:
-    nodes: list[dict[str, object]] = []
-    for index, record in enumerate(session.transcript):
-        overview = context_record_overview(record, node_number=index + 1)
-        token_count = int(overview.get("token_estimate") or 0)
-        tool_token_count = int(overview.get("tool_token_estimate") or 0)
-        nodes.append(
-            {
-                "node_index": index,
-                "node_number": index + 1,
-                "role": sanitize_text(overview.get("role") or "").strip() or "assistant",
-                "token_count": token_count,
-                "tool_token_count": tool_token_count,
-                "preview": sanitize_text(overview.get("preview") or "").strip(),
-            }
-        )
-
-    nodes.sort(
-        key=lambda item: (
-            -int(item.get("token_count") or 0),
-            int(item.get("node_number") or 0),
-        )
-    )
-
-    return {
-        "stats": {
-            "total_token_count": sum(int(item.get("token_count") or 0) for item in nodes),
-            "tool_token_count": sum(int(item.get("tool_token_count") or 0) for item in nodes),
-        },
-        "nodes": sanitize_value(nodes),
-    }
 
 
 def normalize_selected_node_indexes(raw_indexes: Any, transcript_length: int) -> list[int]:
@@ -271,37 +237,40 @@ def summarize_changed_nodes_from_operations(operations: list[dict[str, object]])
                 changed_nodes.append(node_number)
     return changed_nodes
 
-
 def fallback_context_revision_summary(label: str, operations: list[dict[str, object]]) -> str:
-    safe_label = sanitize_text(label).strip() or "Context update"
+    safe_label = sanitize_text(label).strip() or "上下文更新"
     if not operations:
         return safe_label
 
-    if len(operations) == 1:
-        operation = operations[0]
-        operation_type = sanitize_text(operation.get("operation_type") or "").strip()
-        target_nodes = unique_int_list(operation.get("target_node_numbers") or operation.get("changed_nodes"))
-        node_text = f"节点 #{format_node_ranges(target_nodes)}" if target_nodes else "当前上下文"
-        target_items = operation.get("target_items")
-        first_item = target_items[0] if isinstance(target_items, list) and target_items else {}
-        item_number = int(first_item.get("item_number") or 0) if isinstance(first_item, dict) else 0
-        item_text = f"{node_text} 的第 {item_number} 个条目" if item_number else node_text
+    if len(operations) > 1:
+        changed_nodes = summarize_changed_nodes_from_operations(operations)
+        if changed_nodes:
+            return f"调整了节点 #{format_node_ranges(changed_nodes)} 的上下文。"
+        return safe_label
 
-        if operation_type == "compress_nodes":
-            return f"把{node_text}压缩成了更短的摘要，尽量保留主要信息。"
-        if operation_type == "delete_nodes":
-            return f"删除了{node_text}，让当前上下文更紧凑。"
-        if operation_type == "delete_item":
-            return f"删除了{item_text}，去掉了不再需要的上下文内容。"
-        if operation_type == "compress_item":
-            return f"压缩了{item_text}，保留原有条目类型的同时缩短了内容。"
-        if operation_type == "replace_item":
-            return f"改写了{item_text}，把它换成了更合适的新内容。"
+    operation = operations[0]
+    operation_type = sanitize_text(operation.get("operation_type") or "").strip()
+    target_nodes = unique_int_list(operation.get("target_node_numbers") or operation.get("changed_nodes"))
+    node_text = f"节点 #{format_node_ranges(target_nodes)}" if target_nodes else "当前上下文"
 
-    changed_nodes = summarize_changed_nodes_from_operations(operations)
-    if changed_nodes:
-        return f"这一轮集中更新了节点 #{format_node_ranges(changed_nodes)} 的内容，并把它们整理成了新的上下文版本。"
+    target_items = operation.get("target_items")
+    first_item = target_items[0] if isinstance(target_items, list) and target_items else {}
+    item_number = int(first_item.get("item_number") or 0) if isinstance(first_item, dict) else 0
+    item_text = f"{node_text} 的第 {item_number} 个条目" if item_number else node_text
+
+    if operation_type == "compress_nodes":
+        return f"压缩了{node_text}。"
+    if operation_type == "delete_nodes":
+        return f"删除了{node_text}。"
+    if operation_type == "delete_item":
+        return f"删除了{item_text}。"
+    if operation_type == "compress_item":
+        return f"压缩了{item_text}。"
+    if operation_type == "replace_item":
+        return f"改写了{item_text}。"
+
     return safe_label
+
 
 
 def find_active_context_revision_id(revisions: list[dict[str, object]]) -> str | None:
@@ -353,7 +322,7 @@ def ensure_initial_context_revision(session: SessionState) -> None:
             transcript=normalize_transcript(session.transcript),
             context_workbench_history=normalize_context_chat_history(session.context_workbench_history),
             revision_label="初始版本",
-            revision_summary="还没有进行压缩、删除或替换时的完整上下文。",
+            revision_summary="尚未压缩、删除或替换内容的完整上下文。",
             operations=[],
             revision_number=0,
         )
@@ -746,6 +715,24 @@ def context_record_details_payload(record: dict[str, object], *, node_number: in
     }
 
 
+def context_transcript_stats(transcript: list[dict[str, object]]) -> dict[str, int]:
+    records = [
+        record
+        for record in transcript
+        if isinstance(record, dict)
+        and sanitize_text(record.get("role") or "").strip() in {"user", "assistant"}
+    ]
+    overviews = [
+        context_record_overview(record, node_number=index)
+        for index, record in enumerate(records, start=1)
+    ]
+    return {
+        "node_count": len(records),
+        "token_count": sum(int(item.get("token_estimate") or 0) for item in overviews),
+        "tool_token_count": sum(int(item.get("tool_token_estimate") or 0) for item in overviews),
+    }
+
+
 def build_context_workspace_snapshot(
     session: SessionState,
     *,
@@ -759,9 +746,9 @@ def build_context_workspace_snapshot(
         f"- 会话类型：{session.scope}",
         f"- 当前节点数：{len(session.transcript)}",
         f"- 当前选中节点：{format_node_ranges(selected_numbers) or '未单独选中，默认面向全局'}",
-        "- 这一轮里所有 Node # 都以这份快照为准。",
+        "- 本轮里的所有 Node # 都以这份快照为准。",
         "- user 节点直接给全文，assistant 节点默认只给概览。",
-        "- 如果你需要 assistant 节点的完整协议层细节，再调用 get_context_node_details。",
+        "- 如果需要 assistant 节点的完整协议层细节，再调用 get_context_node_details。",
         "",
         "## 节点概览",
     ]
@@ -872,7 +859,7 @@ class ContextWorkbenchDraft:
         if not safe_summary:
             raise ValueError("summary is required")
         if len(safe_summary) > 220:
-            safe_summary = f"{safe_summary[:219].rstrip()}…"
+            safe_summary = f"{safe_summary[:219].rstrip()}..."
 
         self._revision_summary = safe_summary
         return {
@@ -912,95 +899,6 @@ class ContextWorkbenchDraft:
                 targets.append(node)
         return targets
 
-    def resolve_target_nodes(
-        self,
-        arguments: dict[str, Any],
-        *,
-        allow_all_active: bool = False,
-        include_inactive: bool = False,
-    ) -> list[ContextWorkbenchDraftNode]:
-        explicit_numbers = normalize_node_numbers(arguments.get("node_numbers"), self.max_node_number())
-        if explicit_numbers:
-            return self._nodes_by_number(explicit_numbers, include_inactive=include_inactive)
-
-        legacy_indexes = normalize_selected_node_indexes(arguments.get("node_indexes"), self.max_node_number())
-        if legacy_indexes:
-            return self._nodes_by_number([index + 1 for index in legacy_indexes], include_inactive=include_inactive)
-
-        if allow_all_active:
-            return self.active_nodes()
-
-        return []
-
-    def _overview_for_node(self, node: ContextWorkbenchDraftNode) -> dict[str, object]:
-        display_number = node.source_node_number or 1
-        overview = context_record_overview(
-            node.record,
-            node_number=display_number,
-            selected=(node.source_node_number or 0) in self.selected_node_numbers,
-        )
-        overview["payload_kind"] = "node_overview"
-        overview["node_number"] = node.source_node_number
-        overview["label"] = node.label
-        overview["status"] = node.status
-        overview["node_kind"] = node.kind
-        overview["active"] = node.active
-        return overview
-
-    def current_overview_items(self) -> list[dict[str, object]]:
-        return [self._overview_for_node(node) for node in self.active_nodes()]
-
-    def compact_overview_for_node(self, node: ContextWorkbenchDraftNode) -> dict[str, object]:
-        overview = self._overview_for_node(node)
-        overview.pop("full_text", None)
-        return overview
-
-    def compact_overview_items(self, nodes: list[ContextWorkbenchDraftNode]) -> list[dict[str, object]]:
-        return [self.compact_overview_for_node(node) for node in nodes]
-
-    def final_snapshot_payload(self) -> dict[str, object]:
-        active_nodes = self.active_nodes()
-        inactive_nodes = [node for node in sorted(self.nodes, key=lambda item: item.order) if not node.active]
-        compressed_replacements: dict[int, str] = {}
-        for operation in self.operations:
-            if sanitize_text(operation.get("operation_type") or "").strip() != "compress_nodes":
-                continue
-            created_label = sanitize_text(operation.get("created_label") or "").strip()
-            if not created_label:
-                continue
-            for node_number in unique_int_list(operation.get("compressed_node_numbers") or operation.get("target_node_numbers")):
-                compressed_replacements[node_number] = created_label
-
-        active_overviews = self.compact_overview_items(active_nodes)
-        inactive_overviews: list[dict[str, object]] = []
-        for node in inactive_nodes:
-            item = {
-                "node_number": node.source_node_number,
-                "label": node.label,
-                "status": node.status,
-                "node_kind": node.kind,
-                "active": node.active,
-            }
-            if node.status == "compressed" and node.source_node_number in compressed_replacements:
-                item["replaced_by"] = compressed_replacements[node.source_node_number]
-            inactive_overviews.append(item)
-
-        return {
-            "payload_kind": "final_working_snapshot",
-            "working_version": self._working_version,
-            "active_node_count": len(active_nodes),
-            "inactive_node_count": len(inactive_nodes),
-            "total_token_estimate": sum(int(item.get("token_estimate") or 0) for item in active_overviews),
-            "tool_token_estimate": sum(int(item.get("tool_token_estimate") or 0) for item in active_overviews),
-            "selected_node_numbers": list(self.selected_node_numbers),
-            "active_nodes": active_overviews,
-            "inactive_nodes": inactive_overviews,
-            "operations": sanitize_value(self.operations),
-        }
-
-    def overview_items(self, nodes: list[ContextWorkbenchDraftNode]) -> list[dict[str, object]]:
-        return [self._overview_for_node(node) for node in nodes]
-
     def node_details(self, nodes: list[ContextWorkbenchDraftNode]) -> list[dict[str, object]]:
         details: list[dict[str, object]] = []
         for node in nodes:
@@ -1012,30 +910,6 @@ class ContextWorkbenchDraft:
             detail["active"] = node.active
             detail["node_kind"] = node.kind
             details.append(detail)
-        return details
-
-    def mutation_node_details(self, nodes: list[ContextWorkbenchDraftNode]) -> list[dict[str, object]]:
-        details: list[dict[str, object]] = []
-        for node in nodes:
-            provider_items = self._provider_items_for_node(node)
-            overview = self._overview_for_node(node)
-            details.append(
-                {
-                    "payload_kind": "node_mutation_detail",
-                    "node_number": node.source_node_number,
-                    "label": node.label,
-                    "status": node.status,
-                    "active": node.active,
-                    "node_kind": node.kind,
-                    "overview": overview,
-                    "item_count": len(provider_items),
-                    "full_detail_note": (
-                        "Mutation results intentionally omit full provider_items and per-item detail to avoid repeating large node content. "
-                        "For simple delete/replace/compress steps, do not re-open node details just to verify; use the mutation delta. "
-                        "Only call get_context_node_details again when the next edit requires exact updated provider_items from the current working snapshot."
-                    ),
-                }
-            )
         return details
 
     def _next_draft_label(self) -> str:
@@ -1053,280 +927,207 @@ class ContextWorkbenchDraft:
     def _provider_items_for_node(self, node: ContextWorkbenchDraftNode) -> list[dict[str, Any]]:
         return normalize_provider_items(node.record.get("providerItems"))
 
-    def _resolve_item_detail(self, node: ContextWorkbenchDraftNode, item_number: int) -> dict[str, object]:
-        items = self.node_details([node])[0].get("items")
-        if not isinstance(items, list):
-            raise ValueError("node detail items are unavailable")
-        if item_number < 1 or item_number > len(items):
-            raise ValueError(f"item #{item_number} does not exist in {node.label}")
-        item = items[item_number - 1]
-        if not isinstance(item, dict):
-            raise ValueError(f"item #{item_number} could not be resolved in {node.label}")
-        return item
-
-    def _build_mutation_result(
+    def _make_insert_provider_item(
         self,
-        *,
-        summary: str,
-        change_type: str,
-        changed_nodes: list[int],
-        extra: dict[str, object] | None = None,
+        node: ContextWorkbenchDraftNode,
+        insertion: dict[str, Any],
+    ) -> dict[str, Any]:
+        content = sanitize_text(insertion.get("content") or "").strip()
+        role = sanitize_text(node.record.get("role") or "user").strip()
+        safe_role = role if role in {"user", "assistant"} else "user"
+        return {"type": "message", "role": safe_role, "content": content}
+
+    def apply_write_nodes(
+        self,
+        delete_numbers: list[int],
+        inserts: list[dict[str, Any]],
     ) -> dict[str, object]:
-        changed_node_details = self.mutation_node_details(
-            self._nodes_by_number(changed_nodes, include_inactive=True)
-        )
-        active_nodes = self.active_nodes()
-        payload: dict[str, object] = {
-            "payload_kind": "mutation_delta",
-            "summary": summary,
-            "change_type": normalize_change_type(change_type),
-            "working_version": self._working_version,
-            "changed_nodes": unique_int_list(changed_nodes),
-            "active_node_count": len(active_nodes),
-            "inactive_node_count": len([node for node in self.nodes if not node.active]),
-            "changed_node_details": changed_node_details,
-        }
-        if extra:
-            payload.update(sanitize_value(extra))
-        return payload
+        safe_deletes = sorted(set(number for number in delete_numbers if number > 0))
+        active_deletes = [node for node in self._nodes_by_number(safe_deletes) if node.active]
+        if len(active_deletes) != len(safe_deletes):
+            raise ValueError("one or more delete targets do not exist in the current snapshot")
 
-    def delete_nodes(self, nodes: list[ContextWorkbenchDraftNode], *, reason: str) -> dict[str, object]:
-        active_nodes = [node for node in nodes if node.active]
-        if not active_nodes:
-            raise ValueError("No active nodes were resolved for deletion.")
+        anchor_order_counts: dict[float, int] = {}
+        created_nodes: list[ContextWorkbenchDraftNode] = []
+        for insertion in inserts:
+            try:
+                after = int(insertion.get("after") or 0)
+            except (TypeError, ValueError):
+                after = 0
+            if after <= 0:
+                anchor_order = 0.0
+            else:
+                anchor = next(
+                    (node for node in self.nodes if node.source_node_number == after),
+                    None,
+                )
+                if anchor is None:
+                    raise ValueError(f"Node #{after} is not a valid insertion anchor")
+                anchor_order = anchor.order
 
-        deleted_numbers = [
-            node.source_node_number
-            for node in active_nodes
-            if node.source_node_number is not None
-        ]
-        for node in active_nodes:
+            content = sanitize_text(insertion.get("content") or "").strip()
+            if not content:
+                raise ValueError("insert content is required")
+            raw_role = sanitize_text(insertion.get("role") or "user").strip()
+            role = raw_role if raw_role in {"user", "assistant"} else "user"
+
+            anchor_order_counts[anchor_order] = anchor_order_counts.get(anchor_order, 0) + 1
+            created_node = ContextWorkbenchDraftNode(
+                order=anchor_order + (0.001 * anchor_order_counts[anchor_order]),
+                label=self._next_draft_label(),
+                record={
+                    "role": role,
+                    "text": content,
+                    "attachments": [],
+                    "toolEvents": [],
+                    "blocks": [{"kind": "text", "text": content}],
+                    "providerItems": [{"type": "message", "role": role, "content": content}],
+                },
+                active=True,
+                source_node_number=None,
+                kind="draft",
+                status="created",
+            )
+            self.nodes.append(created_node)
+            created_nodes.append(created_node)
+
+        deleted_numbers: list[int] = []
+        for node in active_deletes:
             node.active = False
             node.status = "deleted"
+            if node.source_node_number is not None:
+                deleted_numbers.append(node.source_node_number)
 
-        summary = f"Delete nodes #{format_node_ranges(deleted_numbers)}"
-        self._record_operation(
-            {
-                "operation_type": "delete_nodes",
-                "change_type": "delete",
-                "label": summary,
-                "summary": summary,
-                "changed_nodes": deleted_numbers,
-                "target_node_numbers": deleted_numbers,
-                "reason": sanitize_text(reason),
-            }
-        )
-        return self._build_mutation_result(
-            summary=summary,
-            change_type="delete",
-            changed_nodes=deleted_numbers,
-            extra={
-                "deleted_node_numbers": deleted_numbers,
-            },
-        )
+        summary_parts: list[str] = []
+        if deleted_numbers:
+            summary_parts.append(f"Delete #{format_node_ranges(deleted_numbers)}")
+        if created_nodes:
+            summary_parts.append(f"Insert {len(created_nodes)} node(s)")
+        summary = ", ".join(summary_parts) or "No changes"
 
-    def compress_nodes(
+        if deleted_numbers or created_nodes:
+            change_type = "compress" if deleted_numbers and created_nodes else (
+                "delete" if deleted_numbers else "replace"
+            )
+            self._record_operation(
+                {
+                    "operation_type": "write_nodes",
+                    "change_type": change_type,
+                    "label": summary,
+                    "summary": summary,
+                    "changed_nodes": deleted_numbers,
+                    "target_node_numbers": deleted_numbers,
+                    "inserted_node_count": len(created_nodes),
+                }
+            )
+
+        return {
+            "summary": summary,
+            "deleted": deleted_numbers,
+            "inserted": len(created_nodes),
+        }
+
+    def apply_write_items(
         self,
-        nodes: list[ContextWorkbenchDraftNode],
-        *,
-        summary_markdown: str,
-        style: str,
-        title: str,
+        node_number: int,
+        delete_item_numbers: list[int],
+        inserts: list[dict[str, Any]],
     ) -> dict[str, object]:
-        active_nodes = [node for node in nodes if node.active]
-        if not active_nodes:
-            raise ValueError("No active nodes were resolved for compression.")
+        nodes = self._nodes_by_number([node_number])
+        if not nodes:
+            raise ValueError(f"Node #{node_number} was not found")
+        node = nodes[0]
+        provider_items = list(self._provider_items_for_node(node))
+        safe_deletes = sorted(
+            set(number for number in delete_item_numbers if 1 <= number <= len(provider_items))
+        )
+        if len(safe_deletes) != len(set(delete_item_numbers)):
+            raise ValueError("one or more item numbers are outside the current node")
 
-        safe_summary = sanitize_text(summary_markdown).strip()
-        if not safe_summary:
-            raise ValueError("summary_markdown is required")
+        inserts_by_anchor: dict[int, list[dict[str, Any]]] = {}
+        for insertion in inserts:
+            try:
+                after = int(insertion.get("after") or 0)
+            except (TypeError, ValueError):
+                after = 0
+            if after < 0 or after > len(provider_items):
+                raise ValueError(f"item #{after} is not a valid insertion anchor")
+            if not sanitize_text(insertion.get("content") or "").strip():
+                raise ValueError("insert content is required")
+            inserts_by_anchor.setdefault(after, []).append(insertion)
 
-        target_numbers = [
-            node.source_node_number
-            for node in active_nodes
-            if node.source_node_number is not None
+        delete_set = set(safe_deletes)
+        next_items: list[dict[str, Any]] = [
+            self._make_insert_provider_item(node, insertion)
+            for insertion in inserts_by_anchor.get(0, [])
         ]
-        for node in active_nodes:
-            node.active = False
-            node.status = "compressed"
+        for index, provider_item in enumerate(provider_items, start=1):
+            if index not in delete_set:
+                next_items.append(provider_item)
+            next_items.extend(
+                self._make_insert_provider_item(node, insertion)
+                for insertion in inserts_by_anchor.get(index, [])
+            )
 
-        label = self._next_draft_label()
-        heading = sanitize_text(title).strip()
-        summary_text = safe_summary if not heading else f"### {heading}\n\n{safe_summary}"
-        created_node = ContextWorkbenchDraftNode(
-            order=min(node.order for node in active_nodes) + 0.01,
-            label=label,
-            record={
-                "role": "assistant",
-                "text": summary_text,
-                "attachments": [],
-                "toolEvents": [],
-                "blocks": [{"kind": "text", "text": summary_text}],
-            },
-            active=True,
-            source_node_number=None,
-            kind="draft",
-            status="created",
+        if not safe_deletes and not inserts:
+            return {
+                "applied": False,
+                "node": node_number,
+                "items_deleted": 0,
+                "items_inserted": 0,
+            }
+
+        self._set_node_record(node, compile_record_from_provider_items(node.record, next_items))
+        summary = (
+            f"Edit items in Node #{node_number} "
+            f"(delete {len(safe_deletes)}, insert {len(inserts)})"
         )
-        self.nodes.append(created_node)
-
-        summary = f"Compress nodes #{format_node_ranges(target_numbers)}"
         self._record_operation(
             {
-                "operation_type": "compress_nodes",
-                "change_type": "compress",
+                "operation_type": "write_items",
+                "change_type": "compress" if inserts else "delete",
                 "label": summary,
                 "summary": summary,
-                "changed_nodes": target_numbers,
-                "target_node_numbers": target_numbers,
-                "style": sanitize_text(style).strip(),
-                "created_label": label,
+                "changed_nodes": [node_number],
+                "target_node_numbers": [node_number],
+                "deleted_item_numbers": safe_deletes,
+                "inserted_item_count": len(inserts),
             }
         )
-        return self._build_mutation_result(
-            summary=summary,
-            change_type="compress",
-            changed_nodes=target_numbers,
-            extra={
-                "compressed_node_numbers": target_numbers,
-                "created_label": label,
-                "created_node": self.compact_overview_for_node(created_node),
-            },
-        )
+        return {
+            "applied": True,
+            "node": node_number,
+            "items_deleted": len(safe_deletes),
+            "items_inserted": len(inserts),
+        }
 
-    def delete_item(self, node: ContextWorkbenchDraftNode, *, item_number: int, reason: str) -> dict[str, object]:
-        provider_items = self._provider_items_for_node(node)
-        removed_item = self._resolve_item_detail(node, item_number)
-        del provider_items[item_number - 1]
-        self._set_node_record(node, compile_record_from_provider_items(node.record, provider_items))
-
-        changed_nodes = [node.source_node_number] if node.source_node_number is not None else []
-        summary = f"Delete {node.label} item #{item_number}"
-        self._record_operation(
-            {
-                "operation_type": "delete_item",
-                "change_type": "delete",
-                "label": summary,
-                "summary": summary,
-                "changed_nodes": changed_nodes,
-                "target_node_numbers": changed_nodes,
-                "target_items": [
-                    {
-                        "node_number": node.source_node_number,
-                        "item_number": item_number,
-                        "item_type": sanitize_text(removed_item.get("item_type") or ""),
-                    }
-                ],
-                "reason": sanitize_text(reason).strip(),
-            }
-        )
-        return self._build_mutation_result(
-            summary=summary,
-            change_type="delete",
-            changed_nodes=changed_nodes,
-            extra={
-                "deleted_items": [
-                    {
-                        "node_number": node.source_node_number,
-                        "item_number": item_number,
-                        "item": removed_item,
-                    }
-                ],
-            },
-        )
-
-    def replace_item(
-        self,
-        node: ContextWorkbenchDraftNode,
-        *,
-        item_number: int,
-        replacement_item: dict[str, Any],
-        reason: str,
-        change_type: str = "replace",
-    ) -> dict[str, object]:
-        provider_items = self._provider_items_for_node(node)
-        original_item = self._resolve_item_detail(node, item_number)
-        normalized_replacement = normalize_provider_items([replacement_item])
-        if len(normalized_replacement) != 1:
-            raise ValueError("replacement_item must normalize into exactly one provider item")
-        provider_items[item_number - 1] = normalized_replacement[0]
-        self._set_node_record(node, compile_record_from_provider_items(node.record, provider_items))
-
-        changed_nodes = [node.source_node_number] if node.source_node_number is not None else []
-        summary_prefix = "Compress" if normalize_change_type(change_type) == "compress" else "Replace"
-        summary = f"{summary_prefix} {node.label} item #{item_number}"
-        self._record_operation(
-            {
-                "operation_type": "compress_item"
-                if normalize_change_type(change_type) == "compress"
-                else "replace_item",
-                "change_type": normalize_change_type(change_type),
-                "label": summary,
-                "summary": summary,
-                "changed_nodes": changed_nodes,
-                "target_node_numbers": changed_nodes,
-                "target_items": [
-                    {
-                        "node_number": node.source_node_number,
-                        "item_number": item_number,
-                        "item_type": sanitize_text(original_item.get("item_type") or ""),
-                    }
-                ],
-                "replacement_item": sanitize_value(normalized_replacement[0]),
-                "reason": sanitize_text(reason).strip(),
-            }
-        )
-        return self._build_mutation_result(
-            summary=summary,
-            change_type=change_type,
-            changed_nodes=changed_nodes,
-            extra={
-                "replaced_items": [
-                    {
-                        "node_number": node.source_node_number,
-                        "item_number": item_number,
-                        "before": provider_item_detail(original_item, item_number),
-                        "after": provider_item_detail(normalized_replacement[0], item_number),
-                    }
-                ],
-            },
-        )
-
-    def compress_item(
-        self,
-        node: ContextWorkbenchDraftNode,
-        *,
-        item_number: int,
-        compressed_content: str,
-        style: str,
-    ) -> dict[str, object]:
-        provider_items = self._provider_items_for_node(node)
-        if item_number < 1 or item_number > len(provider_items):
-            raise ValueError(f"item #{item_number} does not exist in {node.label}")
-
-        original_item = provider_items[item_number - 1]
-        item_type = sanitize_text(original_item.get("type") or "").strip()
-        safe_content = sanitize_text(compressed_content).strip()
-        if not safe_content:
-            raise ValueError("compressed_content is required")
-
-        replacement_item = sanitize_value(original_item)
-        if item_type == "message":
-            replacement_item["content"] = replace_provider_message_text(original_item.get("content"), safe_content)
-        elif item_type == "function_call":
-            replacement_item["arguments"] = safe_content
-        elif item_type == "function_call_output":
-            replacement_item["output"] = safe_content
-        else:
-            raise ValueError(f"{node.label} item #{item_number} cannot be compressed")
-
-        return self.replace_item(
-            node,
-            item_number=item_number,
-            replacement_item=replacement_item,
-            reason=sanitize_text(style).strip(),
-            change_type="compress",
-        )
+    def build_draft_snapshot_text(self, session_title: str) -> str:
+        active_nodes = self.active_nodes()
+        lines = [
+            "# 当前主 Agent 上下文快照（已更新）",
+            f"- 会话标题：{sanitize_text(session_title).strip() or '未命名会话'}",
+            f"- 当前节点数：{len(active_nodes)}",
+            "",
+            "## 节点概览",
+        ]
+        for display_number, node in enumerate(active_nodes, start=1):
+            overview = context_record_overview(
+                node.record,
+                node_number=display_number,
+                selected=(node.source_node_number or 0) in self.selected_node_numbers,
+            )
+            role = sanitize_text(overview.get("role") or "unknown").strip() or "unknown"
+            token_label = format_token_count(int(overview.get("token_estimate") or 0))
+            new_mark = " [new]" if node.kind == "draft" else ""
+            lines.append(f"- Node #{display_number}{new_mark} | {role} | {token_label} tokens")
+            if role == "assistant":
+                lines.append(
+                    f"  preview: {sanitize_text(overview.get('preview') or '').strip() or '[empty]'}"
+                )
+            else:
+                full_text = sanitize_text(overview.get("full_text") or "").strip() or "[empty]"
+                lines.extend(f"  {line}" for line in full_text.splitlines())
+        return "\n".join(lines).strip()
 
     def committed_transcript(self) -> list[dict[str, object]]:
         return normalize_transcript([node.record for node in self.active_nodes()])
@@ -1343,21 +1144,30 @@ class ContextWorkbenchDraft:
 
 
 class ContextWorkbenchToolRegistry:
-    def __init__(self, draft: ContextWorkbenchDraft) -> None:
-        self._returned_detail_node_numbers: set[int] = set()
+    def __init__(
+        self,
+        draft: ContextWorkbenchDraft,
+        session_title: str = "",
+        *,
+        review_mode: bool = False,
+    ) -> None:
         self.draft = draft
+        self._session_title = sanitize_text(session_title).strip()
+        self.review_mode = review_mode
+        self.review_rationale = ""
+        self._review_write_completed = False
+        self._expanded_node_numbers: set[int] = set()
         self._tools = {
             definition.name: definition
-            for definition in [
-                self._build_node_detail_tool(),
-                self._build_delete_item_tool(),
-                self._build_replace_item_tool(),
-                self._build_compress_item_tool(),
-                self._build_compress_nodes_tool(),
-                self._build_delete_nodes_tool(),
-                self._build_confirm_working_snapshot_tool(),
-                self._build_set_revision_summary_tool(),
-            ]
+            for definition in (
+                [self._build_write_nodes_tool_v2()]
+                if review_mode
+                else [
+                    self._build_get_nodes_tool_v2(),
+                    self._build_write_nodes_tool_v2(),
+                    self._build_write_items_tool_v2(),
+                ]
+            )
         }
 
     @property
@@ -1368,45 +1178,21 @@ class ContextWorkbenchToolRegistry:
     def tool_catalog(cls) -> list[dict[str, str]]:
         return [
             {
-                "id": "get_context_node_details",
-                "label": "Node Details",
-                "description": "Expand one or more nodes into full blocks and provider items before editing them.",
+                "id": "get_nodes",
+                "label": "读取节点",
+                "description": "按需展开一个或多个节点的完整结构和 provider items。",
                 "status": "available",
             },
             {
-                "id": "delete_context_item",
-                "label": "Delete Item",
-                "description": "Delete one item inside a single node from the current working snapshot.",
+                "id": "write_nodes",
+                "label": "批量编辑节点",
+                "description": "一次完成节点删除、插入、替换或压缩，并返回更新后的草稿快照。",
                 "status": "available",
             },
             {
-                "id": "replace_context_item",
-                "label": "Replace Item",
-                "description": "Replace one item inside a single node with a new provider item.",
-                "status": "available",
-            },
-            {
-                "id": "compress_context_item",
-                "label": "Compress Item",
-                "description": "Replace one item with a shorter version while keeping the same item type.",
-                "status": "available",
-            },
-            {
-                "id": "compress_context_nodes",
-                "label": "Compress Nodes",
-                "description": "Replace one or more nodes with a new summary node inside the current working snapshot.",
-                "status": "available",
-            },
-            {
-                "id": "delete_context_nodes",
-                "label": "Delete Nodes",
-                "description": "Delete one or more nodes from the current working snapshot.",
-                "status": "available",
-            },
-            {
-                "id": "confirm_working_snapshot",
-                "label": "Confirm Working Snapshot",
-                "description": "Confirm the final overview of every active node after all intended edits are complete.",
+                "id": "write_items",
+                "label": "编辑节点条目",
+                "description": "在确有必要时编辑单个节点内部的 item。",
                 "status": "available",
             },
         ]
@@ -1433,571 +1219,232 @@ class ContextWorkbenchToolRegistry:
                 status="error",
             )
 
-    def _target_resolution_execution(
-        self,
-        *,
-        action_name: str,
-        message: str,
-        candidates: list[dict[str, object]] | None = None,
-        requires_single_node: bool = False,
-        should_expand_details: bool = False,
-    ) -> ToolExecution:
-        payload = {
-            "payload_kind": "target_resolution",
-            "resolved": False,
-            "action": action_name,
-            "message": message,
-            "requires_single_node": requires_single_node,
-            "should_expand_details": should_expand_details,
-            "selected_node_numbers": list(self.draft.selected_node_numbers),
-            "candidates": sanitize_value(candidates or []),
-        }
-        return ToolExecution(
-            output_text=json.dumps(payload, ensure_ascii=False),
-            display_title="Target Resolution",
-            display_detail=action_name,
-            display_result=message,
-            status="needs_input",
-        )
-
-    def _item_resolution_execution(
-        self,
-        *,
-        node: ContextWorkbenchDraftNode,
-        item_number: int,
-        message: str,
-    ) -> ToolExecution:
-        payload = {
-            "payload_kind": "item_resolution",
-            "resolved": False,
-            "message": message,
-            "requested_item_number": item_number,
-            "node_detail": self.draft.node_details([node])[0],
-        }
-        return ToolExecution(
-            output_text=json.dumps(payload, ensure_ascii=False),
-            display_title="Item Resolution",
-            display_detail=node.label,
-            display_result=message,
-            status="needs_input",
-        )
-
-    def _mark_detail_nodes_returned(self, nodes: list[ContextWorkbenchDraftNode]) -> None:
-        for node in nodes:
-            if node.source_node_number is not None:
-                self._returned_detail_node_numbers.add(node.source_node_number)
-
-    def _filter_new_detail_nodes(
-        self,
-        nodes: list[ContextWorkbenchDraftNode],
-    ) -> tuple[list[ContextWorkbenchDraftNode], list[int]]:
-        fresh_nodes: list[ContextWorkbenchDraftNode] = []
-        cached_numbers: list[int] = []
-        for node in nodes:
-            if node.source_node_number is None:
-                fresh_nodes.append(node)
-                continue
-            if node.source_node_number in self._returned_detail_node_numbers:
-                cached_numbers.append(node.source_node_number)
-                continue
-            fresh_nodes.append(node)
-        return fresh_nodes, cached_numbers
-
-    def _invalidate_detail_cache(self) -> None:
-        self._returned_detail_node_numbers.clear()
-
-    def _build_node_detail_tool(self) -> ContextWorkbenchToolDefinition:
+    def _build_get_nodes_tool_v2(self) -> ContextWorkbenchToolDefinition:
         def handler(arguments: dict[str, Any]) -> ToolExecution:
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="get_context_node_details",
-                    message="get_context_node_details requires explicit node_numbers from the current snapshot.",
-                    should_expand_details=True,
-                )
-
-            fresh_nodes, cached_node_numbers = self._filter_new_detail_nodes(nodes)
-            details = self.draft.node_details(fresh_nodes)
-            self._mark_detail_nodes_returned(fresh_nodes)
-            labels = ", ".join(
-                sanitize_text(item.get("label") or "").strip()
-                for item in details
-                if sanitize_text(item.get("label") or "").strip()
+            raw_numbers = arguments.get("node_numbers")
+            if not isinstance(raw_numbers, list) or not raw_numbers:
+                raise ValueError("node_numbers is required")
+            node_numbers = normalize_node_numbers(raw_numbers, self.draft.max_node_number())
+            nodes = self.draft._nodes_by_number(node_numbers)
+            if len(nodes) != len(node_numbers):
+                raise ValueError("one or more nodes do not exist in the current snapshot")
+            details = self.draft.node_details(nodes)
+            self._expanded_node_numbers.update(node_numbers)
+            label = ", ".join(f"Node #{number}" for number in node_numbers)
+            return ToolExecution(
+                output_text=json.dumps({"nodes": details}, ensure_ascii=False),
+                display_title="读取节点",
+                display_detail=label,
+                display_result=f"已返回 {label} 的完整内容。",
+                status="completed",
             )
-            cached_label = format_node_ranges(cached_node_numbers)
-            display_result_parts: list[str] = []
-            if labels:
-                display_result_parts.append(f"Returned details for {labels}.")
-            if cached_label:
-                display_result_parts.append(
-                    f"Skipped duplicate details for Node #{cached_label}; use the previous result from this turn."
-                )
+
+        return ContextWorkbenchToolDefinition(
+            name="get_nodes",
+            label="读取节点",
+            description=(
+                "Expand one or more nodes into full structured item details. "
+                "Use this before editing assistant nodes; non-assistant full text is already in the snapshot."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "node_numbers": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "1-based Node # values from the current round's initial snapshot.",
+                    }
+                },
+                "required": ["node_numbers"],
+                "additionalProperties": False,
+            },
+            status="available",
+            handler=handler,
+        )
+
+    def _build_write_nodes_tool_v2(self) -> ContextWorkbenchToolDefinition:
+        def handler(arguments: dict[str, Any]) -> ToolExecution:
+            raw_delete = arguments.get("delete") or []
+            raw_inserts = arguments.get("inserts") or []
+            if not isinstance(raw_delete, list) or not isinstance(raw_inserts, list):
+                raise ValueError("delete and inserts must be arrays")
+            delete_numbers = [
+                int(number)
+                for number in raw_delete
+                if isinstance(number, (int, float)) and int(number) > 0
+            ]
+            inserts = [item for item in raw_inserts if isinstance(item, dict)]
+            if len(delete_numbers) != len(raw_delete) or len(inserts) != len(raw_inserts):
+                raise ValueError("delete and inserts contain invalid entries")
+            if not delete_numbers and not inserts:
+                raise ValueError("provide delete and/or inserts")
+
+            if self.review_mode:
+                if self._review_write_completed:
+                    raise ValueError("automatic context review accepts exactly one write_nodes proposal")
+                self.review_rationale = re.sub(
+                    r"\s+",
+                    " ",
+                    sanitize_text(arguments.get("review_rationale") or ""),
+                ).strip()
+                if not self.review_rationale:
+                    raise ValueError("review_rationale is required")
+
+            result = self.draft.apply_write_nodes(delete_numbers, inserts)
+            self._expanded_node_numbers.clear()
+            if self.review_mode:
+                self._review_write_completed = True
+                self.draft.set_revision_summary(self.review_rationale)
             return ToolExecution(
                 output_text=json.dumps(
                     {
-                        "payload_kind": "node_detail_list",
-                        "selected_node_numbers": list(self.draft.selected_node_numbers),
-                        "items": details,
-                        "cached_node_numbers": cached_node_numbers,
-                        "cached_message": (
-                            f"Node #{cached_label} details were already returned earlier in this same workbench turn. "
-                            "Use the previous function_call_output for those nodes."
-                            if cached_node_numbers
-                            else ""
-                        ),
+                        "result": result,
+                        "updated_snapshot": self.draft.build_draft_snapshot_text(self._session_title),
                     },
                     ensure_ascii=False,
                 ),
-                display_title="Node Details",
-                display_detail=labels or "node details",
-                display_result=" ".join(display_result_parts)
-                or "The requested node details were already returned earlier in this turn.",
+                display_title="批量编辑节点",
+                display_detail=sanitize_text(result.get("summary") or ""),
+                display_result=sanitize_text(result.get("summary") or "节点已更新。"),
+                status="completed",
             )
 
-        return ContextWorkbenchToolDefinition(
-            name="get_context_node_details",
-            label="Node Details",
-            description="Expand one or more nodes into full blocks and provider items before editing them.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required 1-based Node # values from the current snapshot.",
-                    },
-                },
-                "required": ["node_numbers"],
-                "additionalProperties": False,
+        properties: dict[str, Any] = {
+            "delete": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Node numbers to delete from the initial snapshot.",
             },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_delete_item_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            item_number = int(arguments.get("item_number") or 0)
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="delete_context_item",
-                    message="delete_context_item requires exactly one explicit node_numbers value from the current snapshot.",
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-            if len(nodes) != 1:
-                return self._target_resolution_execution(
-                    action_name="delete_context_item",
-                    message="delete_context_item needs exactly one target node. Narrow it to a single Node # first.",
-                    candidates=self.draft.overview_items(nodes),
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-
-            node = nodes[0]
-            try:
-                self.draft._resolve_item_detail(node, item_number)
-            except ValueError as exc:
-                return self._item_resolution_execution(node=node, item_number=item_number, message=str(exc))
-
-            result = self.draft.delete_item(
-                node,
-                item_number=item_number,
-                reason=sanitize_text(arguments.get("reason") or "").strip(),
-            )
-            self._invalidate_detail_cache()
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Delete Item",
-                display_detail=result["summary"],
-                display_result=result["summary"],
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="delete_context_item",
-            label="Delete Item",
-            description="Delete one item inside a single node from the current working snapshot.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required single 1-based Node # value from the current snapshot.",
-                    },
-                    "item_number": {
-                        "type": "integer",
-                        "description": "Required item # inside the resolved node.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional reason for deleting this item.",
-                    },
-                },
-                "required": ["node_numbers", "item_number"],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _replacement_item_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "type": {
-                    "type": "string",
-                    "enum": ["message", "function_call", "function_call_output"],
-                },
-                "role": {
-                    "type": "string",
-                    "enum": ["system", "developer", "user", "assistant"],
-                },
-                "content": {
-                    "type": ["string", "array"],
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": True,
-                    },
-                },
-                "call_id": {
-                    "type": "string",
-                },
-                "name": {
-                    "type": "string",
-                },
-                "arguments": {
-                    "type": "string",
-                },
-                "output": {
-                    "type": "string",
-                },
-            },
-            "required": ["type"],
-            "additionalProperties": False,
-        }
-
-    def _build_replace_item_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            item_number = int(arguments.get("item_number") or 0)
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="replace_context_item",
-                    message="replace_context_item requires exactly one explicit node_numbers value from the current snapshot.",
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-            if len(nodes) != 1:
-                return self._target_resolution_execution(
-                    action_name="replace_context_item",
-                    message="replace_context_item needs exactly one target node. Narrow it to a single Node # first.",
-                    candidates=self.draft.overview_items(nodes),
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-
-            node = nodes[0]
-            try:
-                self.draft._resolve_item_detail(node, item_number)
-            except ValueError as exc:
-                return self._item_resolution_execution(node=node, item_number=item_number, message=str(exc))
-
-            replacement_item = arguments.get("replacement_item")
-            if not isinstance(replacement_item, dict):
-                return self._item_resolution_execution(
-                    node=node,
-                    item_number=item_number,
-                    message="replacement_item must be an object that matches one editable provider item.",
-                )
-
-            result = self.draft.replace_item(
-                node,
-                item_number=item_number,
-                replacement_item=replacement_item,
-                reason=sanitize_text(arguments.get("reason") or "").strip(),
-            )
-            self._invalidate_detail_cache()
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Replace Item",
-                display_detail=result["summary"],
-                display_result=result["summary"],
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="replace_context_item",
-            label="Replace Item",
-            description="Replace one item inside a single node with a new provider item.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required single 1-based Node # value from the current snapshot.",
-                    },
-                    "item_number": {
-                        "type": "integer",
-                        "description": "Required item # inside the resolved node.",
-                    },
-                    "replacement_item": self._replacement_item_schema(),
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional reason for replacing this item.",
-                    },
-                },
-                "required": ["node_numbers", "item_number", "replacement_item"],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_compress_item_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            item_number = int(arguments.get("item_number") or 0)
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="compress_context_item",
-                    message="compress_context_item requires exactly one explicit node_numbers value from the current snapshot.",
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-            if len(nodes) != 1:
-                return self._target_resolution_execution(
-                    action_name="compress_context_item",
-                    message="compress_context_item needs exactly one target node. Narrow it to a single Node # first.",
-                    candidates=self.draft.overview_items(nodes),
-                    requires_single_node=True,
-                    should_expand_details=True,
-                )
-
-            node = nodes[0]
-            try:
-                self.draft._resolve_item_detail(node, item_number)
-            except ValueError as exc:
-                return self._item_resolution_execution(node=node, item_number=item_number, message=str(exc))
-
-            result = self.draft.compress_item(
-                node,
-                item_number=item_number,
-                compressed_content=sanitize_text(arguments.get("compressed_content") or ""),
-                style=sanitize_text(arguments.get("style") or "").strip(),
-            )
-            self._invalidate_detail_cache()
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Compress Item",
-                display_detail=result["summary"],
-                display_result=result["summary"],
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="compress_context_item",
-            label="Compress Item",
-            description="Replace one item with a shorter version while keeping the same item type.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required single 1-based Node # value from the current snapshot.",
-                    },
-                    "item_number": {
-                        "type": "integer",
-                        "description": "Required item # inside the resolved node.",
-                    },
-                    "compressed_content": {
-                        "type": "string",
-                        "description": "The shorter replacement content for this item.",
-                    },
-                    "style": {
-                        "type": "string",
-                        "description": "Optional note about the compression style.",
-                    },
-                },
-                "required": ["node_numbers", "item_number", "compressed_content"],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_compress_nodes_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="compress_context_nodes",
-                    message="compress_context_nodes requires explicit node_numbers from the current snapshot.",
-                )
-
-            result = self.draft.compress_nodes(
-                nodes,
-                summary_markdown=sanitize_text(arguments.get("summary_markdown") or ""),
-                style=sanitize_text(arguments.get("style") or "").strip() or "tight summary",
-                title=sanitize_text(arguments.get("title") or "").strip(),
-            )
-            self._invalidate_detail_cache()
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Compress Nodes",
-                display_detail=result["summary"],
-                display_result=result["summary"],
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="compress_context_nodes",
-            label="Compress Nodes",
-            description="Replace one or more nodes with a new summary node inside the current working snapshot.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required 1-based Node # values from the current snapshot.",
-                    },
-                    "summary_markdown": {
-                        "type": "string",
-                        "description": "Markdown content that should become the new summary node.",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Optional heading for the created summary node.",
-                    },
-                    "style": {
-                        "type": "string",
-                        "description": "Short note about the compression style.",
-                    },
-                },
-                "required": ["node_numbers", "summary_markdown"],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_delete_nodes_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            nodes = self.draft.resolve_target_nodes(arguments)
-            if not nodes:
-                return self._target_resolution_execution(
-                    action_name="delete_context_nodes",
-                    message="delete_context_nodes requires explicit node_numbers from the current snapshot.",
-                )
-
-            result = self.draft.delete_nodes(
-                nodes,
-                reason=sanitize_text(arguments.get("reason") or "").strip(),
-            )
-            self._invalidate_detail_cache()
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Delete Nodes",
-                display_detail=result["summary"],
-                display_result=result["summary"],
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="delete_context_nodes",
-            label="Delete Nodes",
-            description="Delete one or more nodes from the current working snapshot.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "node_numbers": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Required 1-based Node # values from the current snapshot.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional reason for deleting these nodes.",
-                    },
-                },
-                "required": ["node_numbers"],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_confirm_working_snapshot_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(_arguments: dict[str, Any]) -> ToolExecution:
-            result = self.draft.final_snapshot_payload()
-            active_count = int(result.get("active_node_count") or 0)
-            inactive_count = int(result.get("inactive_node_count") or 0)
-            total_tokens = int(result.get("total_token_estimate") or 0)
-            return ToolExecution(
-                output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Confirm Working Snapshot",
-                display_detail=f"{active_count} active nodes, {inactive_count} inactive nodes",
-                display_result=(
-                    f"Confirmed final working snapshot: {active_count} active nodes, "
-                    f"{inactive_count} inactive nodes, about {format_token_count(total_tokens)} tokens."
-                ),
-            )
-
-        return ContextWorkbenchToolDefinition(
-            name="confirm_working_snapshot",
-            label="Confirm Working Snapshot",
-            description="Confirm the final overview of every active node after all intended edits are complete. Use once near the end of a turn, not after every edit.",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-            status="available",
-            handler=handler,
-        )
-
-    def _build_set_revision_summary_tool(self) -> ContextWorkbenchToolDefinition:
-        def handler(arguments: dict[str, Any]) -> ToolExecution:
-            try:
-                result = self.draft.set_revision_summary(
-                    sanitize_text(arguments.get("summary") or ""),
-                )
-            except ValueError as exc:
-                return ToolExecution(
-                    output_text=json.dumps(
-                        {
-                            "payload_kind": "revision_summary",
-                            "saved": False,
-                            "message": str(exc),
+            "inserts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "after": {
+                            "type": "integer",
+                            "description": (
+                                "Initial snapshot anchor. Use 0 for the beginning; the anchor remains valid "
+                                "even when it is also deleted."
+                            ),
                         },
-                        ensure_ascii=False,
-                    ),
-                    display_title="Revision Summary",
-                    display_detail="summary not saved",
-                    display_result=str(exc),
-                    status="needs_input",
-                )
+                        "role": {
+                            "type": "string",
+                            "enum": ["user", "assistant"],
+                            "description": "Role for the new node. Defaults to user.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Markdown content for the new node.",
+                        },
+                    },
+                    "required": ["after", "content"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        required: list[str] = []
+        if self.review_mode:
+            properties["review_rationale"] = {
+                "type": "string",
+                "description": (
+                    "A user-facing proposal rationale. Explain what old material should be consolidated, "
+                    "how it relates to the current task, what decisions or unfinished work remain, and any risk. "
+                    "Use proposal language and never mention node numbers, tokens, tools, or draft mechanics."
+                ),
+            }
+            required = ["review_rationale"]
 
+        return ContextWorkbenchToolDefinition(
+            name="write_nodes",
+            label="批量编辑节点",
+            description=(
+                "Submit the complete selective context-maintenance proposal in one call."
+                if self.review_mode
+                else (
+                    "Delete and/or insert nodes in the working snapshot. All references use the initial "
+                    "snapshot for this round. Prefer one complete batch and inspect updated_snapshot."
+                )
+            ),
+            parameters={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+            status="available",
+            handler=handler,
+        )
+
+    def _build_write_items_tool_v2(self) -> ContextWorkbenchToolDefinition:
+        def handler(arguments: dict[str, Any]) -> ToolExecution:
+            try:
+                node_number = int(arguments.get("node_number") or 0)
+            except (TypeError, ValueError):
+                node_number = 0
+            if node_number <= 0:
+                raise ValueError("node_number is required")
+            if node_number not in self._expanded_node_numbers:
+                raise ValueError("call get_nodes for this node before editing its items")
+            raw_delete = arguments.get("delete") or []
+            raw_inserts = arguments.get("inserts") or []
+            if not isinstance(raw_delete, list) or not isinstance(raw_inserts, list):
+                raise ValueError("delete and inserts must be arrays")
+            delete_numbers = [
+                int(number)
+                for number in raw_delete
+                if isinstance(number, (int, float)) and int(number) > 0
+            ]
+            inserts = [item for item in raw_inserts if isinstance(item, dict)]
+            if len(delete_numbers) != len(raw_delete) or len(inserts) != len(raw_inserts):
+                raise ValueError("delete and inserts contain invalid entries")
+            if not delete_numbers and not inserts:
+                raise ValueError("provide delete and/or inserts")
+            result = self.draft.apply_write_items(node_number, delete_numbers, inserts)
+            self._expanded_node_numbers.discard(node_number)
             return ToolExecution(
                 output_text=json.dumps(result, ensure_ascii=False),
-                display_title="Revision Summary",
-                display_detail="saved",
-                display_result=result["summary"],
+                display_title="编辑节点条目",
+                display_detail=f"Node #{node_number}",
+                display_result=(
+                    f"Node #{node_number}：删除 {result['items_deleted']} 项，"
+                    f"插入 {result['items_inserted']} 项。"
+                ),
+                status="completed",
             )
 
         return ContextWorkbenchToolDefinition(
-            name="set_context_revision_summary",
-            label="Revision Summary",
-            description="After finishing working-snapshot edits, save one short summary (matching user language) that explains what this commit changed. Describe the content changed (e.g. 'compressed tool outputs'), not the node numbers. This text will be shown in the restore history.",
+            name="write_items",
+            label="编辑节点条目",
+            description=(
+                "Delete and/or insert provider items inside one node. Call get_nodes first and only use "
+                "this when node-level editing cannot preserve the required assistant structure."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "One short summary (matching user language) of the content that changed in the context snapshot.",
+                    "node_number": {"type": "integer"},
+                    "delete": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "1-based item numbers from get_nodes.",
+                    },
+                    "inserts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "after": {
+                                    "type": "integer",
+                                    "description": "Original item anchor; use 0 for the beginning.",
+                                },
+                                "content": {"type": "string"},
+                            },
+                            "required": ["after", "content"],
+                            "additionalProperties": False,
+                        },
                     },
                 },
-                "required": ["summary"],
+                "required": ["node_number"],
                 "additionalProperties": False,
             },
             status="available",

@@ -20,6 +20,7 @@ class ResponsesStreamResult:
     function_calls: list[Any]
     finish_reason: str | None = None
     canonical_items: Sequence[Any] = ()
+    usage: Mapping[str, Any] | None = None
 
 
 class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
@@ -149,6 +150,7 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
         output_chunks: list[str] = []
         function_calls: list[Any] = []
         saw_text_delta = False
+        final_response: Any | None = None
 
         with self.client.responses.stream(**dict(request)) as stream:
             for event in stream:
@@ -167,6 +169,8 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
                 elif event.type == "response.output_item.done":
                     if getattr(event.item, "type", None) == "function_call":
                         function_calls.append(event.item)
+                elif event.type == "response.completed":
+                    final_response = getattr(event, "response", None)
                 elif event.type == "error":
                     raise RuntimeError(
                         self._sanitize_text(
@@ -183,9 +187,18 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
                         )
                     raise RuntimeError("response failed")
 
+            get_final_response = getattr(stream, "get_final_response", None)
+            if final_response is None and callable(get_final_response):
+                final_response = get_final_response()
+
+        raw_usage = getattr(final_response, "usage", None)
+        safe_usage = self._sanitize_value(raw_usage) if raw_usage is not None else None
+
         return ResponsesStreamResult(
             output_text="".join(output_chunks),
             function_calls=function_calls,
+            finish_reason=self._sanitize_text(getattr(final_response, "status", "") or "") or None,
+            usage=dict(safe_usage) if isinstance(safe_usage, Mapping) else None,
         )
 
     def _stream_events(
@@ -197,6 +210,7 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
 
         output_chunks: list[str] = []
         saw_text_delta = False
+        final_response: Any | None = None
 
         with self.client.responses.stream(**dict(request)) as stream:
             for event in stream:
@@ -224,6 +238,8 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
                             raw_arguments=raw_arguments,
                             provider_raw=item,
                         )
+                elif event.type == "response.completed":
+                    final_response = getattr(event, "response", None)
                 elif event.type == "error":
                     raise RuntimeError(
                         self._sanitize_text(
@@ -240,7 +256,18 @@ class ResponsesAdapter(BaseAdapter[dict[str, Any]]):
                         )
                     raise RuntimeError("response failed")
 
-        yield ProviderDoneEvent(output_text="".join(output_chunks))
+            get_final_response = getattr(stream, "get_final_response", None)
+            if final_response is None and callable(get_final_response):
+                final_response = get_final_response()
+
+        raw_usage = getattr(final_response, "usage", None)
+        safe_usage = self._sanitize_value(raw_usage) if raw_usage is not None else None
+        yield ProviderDoneEvent(
+            output_text="".join(output_chunks),
+            finish_reason=self._sanitize_text(getattr(final_response, "status", "") or "") or None,
+            usage=dict(safe_usage) if isinstance(safe_usage, Mapping) else None,
+            provider_raw=final_response,
+        )
 
     def _get_instructions(self) -> str:
         if callable(self._instructions):

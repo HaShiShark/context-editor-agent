@@ -141,14 +141,7 @@ export interface OpenAISettings {
   user_locale: string;
   user_timezone: string;
   user_profile: string;
-  theme_color: string;
-  theme_mode: 'light' | 'dark' | 'system';
-  background_color: string;
-  ui_font: string;
-  code_font: string;
-  ui_font_size: number;
-  code_font_size: number;
-  appearance_contrast: number;
+  theme_mode: 'light' | 'dark';
   service_hints_enabled: boolean;
   has_api_key: boolean;
   api_key_preview: string;
@@ -280,6 +273,7 @@ export interface InitPayload {
   context_workbench_histories?: Record<string, ContextWorkbenchHistoryEntry[]>;
   context_revision_histories?: Record<string, ContextRevisionSummary[]>;
   pending_context_restores?: Record<string, PendingContextRestore>;
+  pending_context_reviews?: Record<string, ContextReview>;
 }
 
 export interface SidebarPayload {
@@ -383,29 +377,62 @@ export interface ContextWorkbenchSettingsResponse {
     context_workbench_provider_id: string;
     context_token_warning_threshold: number;
     context_token_critical_threshold: number;
+    context_review_auto_enabled: boolean;
+    context_review_interval_minutes: number;
   };
   models: string[];
   response_providers?: ResponseProviderSettings[];
   tool_catalog: ContextWorkbenchToolCatalogItem[];
 }
 
-export interface ContextWorkbenchSuggestionStats {
-  total_token_count: number;
-  tool_token_count: number;
-}
-
-export interface ContextWorkbenchSuggestionNode {
-  node_index: number;
-  node_number: number;
-  role: string;
+export interface ContextReviewStats {
+  node_count: number;
   token_count: number;
-  tool_token_count: number;
-  preview: string;
 }
 
-export interface ContextWorkbenchSuggestionsResponse {
-  stats: ContextWorkbenchSuggestionStats;
-  nodes: ContextWorkbenchSuggestionNode[];
+export interface ContextReview {
+  id: string;
+  session_id: string;
+  source: 'manual' | 'auto_idle';
+  created_at: string;
+  summary: string;
+  model: string;
+  base_context_fingerprint: string;
+  before: ContextReviewStats;
+  after: ContextReviewStats;
+  proposed_transcript: TranscriptRecord[];
+  operations: Array<Record<string, unknown>>;
+}
+
+export interface ContextReviewResponse {
+  review: ContextReview | null;
+  conversation?: TranscriptRecord[];
+  context_input?: TranscriptRecord[];
+  history?: ContextWorkbenchHistoryEntry[];
+  revisions?: ContextRevisionSummary[];
+  pending_restore?: PendingContextRestore | null;
+}
+
+export interface SessionUsageBucket {
+  request_count: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  cache_write_tokens: number;
+  non_cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  latest_at?: string;
+}
+
+export interface SessionUsageSummary extends SessionUsageBucket {
+  session_id: string;
+  by_kind: Record<string, SessionUsageBucket>;
+  by_model: Record<string, SessionUsageBucket>;
+}
+
+export interface SessionUsageResponse {
+  summary: SessionUsageSummary;
 }
 
 export interface StreamDeltaEvent {
@@ -496,11 +523,6 @@ export interface PermissionOption {
   label: string;
   icon: string;
   toastMessage?: string;
-}
-
-export interface ThemeOption {
-  value: string;
-  label: string;
 }
 
 export interface SessionMeta {

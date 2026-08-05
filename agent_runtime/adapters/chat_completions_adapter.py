@@ -20,6 +20,7 @@ _CORE_REQUEST_KEYS = {
     "stream",
     "tool_choice",
     "tools",
+    "stream_options",
 }
 
 _MESSAGE_ITEM_TYPES = {"message", None}
@@ -50,6 +51,10 @@ class ChatCompletionsAdapter(BaseAdapter[dict[str, Any]]):
                 "model": context.model,
                 "messages": self._build_messages(context),
                 "stream": True,
+                "stream_options": {
+                    **dict(context.provider_config.get("stream_options") or {}),
+                    "include_usage": True,
+                },
             }
         )
         if tools:

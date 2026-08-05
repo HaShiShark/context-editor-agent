@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 import re
@@ -22,9 +23,9 @@ try:
 except ImportError:  # pragma: no cover - dependency fallback for partially installed environments
     tiktoken = None
 
-from simple_agent.agent import SimpleAgent, ToolEvent, sanitize_text
-from simple_agent.config import Settings, _UNSET, load_settings, save_settings
-from simple_agent.tools import ToolExecution
+from app_agent.session_agent import SessionAgent, ToolEvent, sanitize_text
+from app_agent.settings import Settings, _UNSET, load_settings, save_settings
+from app_agent.tools import ToolExecution
 from web_server_modules.attachments import (
     DATA_URL_PATTERN,
     MAX_ATTACHMENT_BYTES,
@@ -85,8 +86,12 @@ from web_server_modules.transcript import (
     provider_input_item_text,
     provider_input_to_context_records,
     provider_item_detail,
-    replace_provider_message_text,
     sanitize_provider_input_item,
+)
+from web_server_modules.usage import (
+    add_provider_usage,
+    normalize_usage_summary,
+    usage_summary_payload,
 )
 from web_server_modules.context_workbench import (
     ContextWorkbenchDraft,
@@ -100,7 +105,7 @@ from web_server_modules.context_workbench import (
     context_record_overview,
     context_record_preview,
     context_revision_summaries,
-    context_workbench_suggestions_payload,
+    context_transcript_stats,
     ensure_initial_context_revision,
     estimate_token_count,
     fallback_context_revision_summary,
@@ -180,12 +185,14 @@ class SessionState:
     title: str
     scope: str
     project_id: str | None
-    agent: SimpleAgent
+    agent: SessionAgent
     transcript: list[dict[str, object]]
     context_input: list[dict[str, object]]
     context_workbench_history: list[dict[str, str]]
     context_revisions: list[dict[str, object]]
     pending_context_restore: dict[str, object] | None
+    pending_context_review: dict[str, object] | None
+    usage_summary: dict[str, object]
     active_request_mode: str | None = None
     active_request_id: str | None = None
     active_cancel_event: threading.Event | None = None
@@ -200,23 +207,83 @@ class ProjectState:
     archived_session_ids: list[str] | None = None
 
 
+def context_transcript_fingerprint(transcript: list[dict[str, object]]) -> str:
+    canonical = json.dumps(
+        sanitize_value(normalize_transcript(transcript)),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def normalize_pending_context_review(raw_review: Any) -> dict[str, object] | None:
+    if not isinstance(raw_review, dict):
+        return None
+    review_id = sanitize_text(raw_review.get("id") or "").strip()
+    base_fingerprint = sanitize_text(raw_review.get("base_context_fingerprint") or "").strip()
+    proposed_transcript = normalize_transcript(raw_review.get("proposed_transcript"))
+    if not review_id or not base_fingerprint or not proposed_transcript:
+        return None
+    operations = raw_review.get("operations")
+    return {
+        "id": review_id,
+        "session_id": sanitize_text(raw_review.get("session_id") or "").strip(),
+        "source": "auto_idle" if raw_review.get("source") == "auto_idle" else "manual",
+        "created_at": sanitize_text(raw_review.get("created_at") or "").strip() or utc_timestamp(),
+        "summary": sanitize_text(raw_review.get("summary") or "").strip(),
+        "model": sanitize_text(raw_review.get("model") or "").strip(),
+        "base_context_fingerprint": base_fingerprint,
+        "before": sanitize_value(raw_review.get("before") or {}),
+        "after": sanitize_value(raw_review.get("after") or {}),
+        "proposed_transcript": sanitize_value(proposed_transcript),
+        "operations": sanitize_value(operations if isinstance(operations, list) else []),
+    }
+
+
+def pending_context_review_payload(raw_review: Any) -> dict[str, object] | None:
+    review = normalize_pending_context_review(raw_review)
+    return sanitize_value(review) if review is not None else None
+
+
 class AppState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.lock = threading.Lock()
+        self._request_condition = threading.Condition(self.lock)
         self.projects: list[ProjectState] = []
         self.chat_session_ids: list[str] = []
         self.sessions: dict[str, SessionState] = {}
+        self._context_review_timer_lock = threading.Lock()
+        self._context_review_timers: dict[str, threading.Timer] = {}
+        self._auto_review_request_ids: set[str] = set()
         self.state_store = SQLiteStateStore(STATE_DB_FILE, legacy_json_file=STATE_FILE)
         self._load_state()
 
     def refresh_settings(self, settings: Settings) -> None:
+        with self._context_review_timer_lock:
+            scheduled_session_ids = list(self._context_review_timers)
         with self.lock:
             self.settings = settings
             for session in self.sessions.values():
-                session.agent = SimpleAgent(self._settings_for_session_locked(session))
+                session.agent = SessionAgent(self._settings_for_session_locked(session))
                 self._hydrate_agent_locked(session)
             self._save_state_locked()
+        for session_id in scheduled_session_ids:
+            self.cancel_scheduled_context_review(session_id)
+        if settings.context_review_auto_enabled:
+            for session_id in scheduled_session_ids:
+                try:
+                    session = self.get_session(session_id)
+                except ValueError:
+                    continue
+                with self.lock:
+                    should_reschedule = (
+                        session.pending_context_review is None
+                        and len(normalize_transcript(session.transcript)) >= 2
+                    )
+                if should_reschedule:
+                    self.schedule_context_review(session)
 
     def create_project(self, title: str | None = None, root_path: str | None = None) -> ProjectState:
         with self.lock:
@@ -294,17 +361,20 @@ class AppState:
             if normalized_scope == "project":
                 project = self._find_project_locked(project_id) or self._ensure_default_project_locked()
                 target_project_id = project.project_id
+            new_session_id = uuid.uuid4().hex
             session = SessionState(
-                session_id=uuid.uuid4().hex,
+                session_id=new_session_id,
                 title=NEW_SESSION_TITLE,
                 scope=normalized_scope,
                 project_id=target_project_id,
-                agent=SimpleAgent(self._settings_for_project_locked(target_project_id)),
+                agent=SessionAgent(self._settings_for_project_locked(target_project_id)),
                 transcript=[],
                 context_input=[],
                 context_workbench_history=[],
                 context_revisions=[],
                 pending_context_restore=None,
+                pending_context_review=None,
+                usage_summary=normalize_usage_summary({}, new_session_id),
             )
             session.context_input = provider_input_to_context_records(session.agent.request_input_snapshot())
             ensure_initial_context_revision(session)
@@ -324,29 +394,45 @@ class AppState:
                 raise ValueError("session not found")
             return session
 
-    def acquire_session_request(self, session: SessionState, mode: str) -> str:
+    def acquire_session_request(
+        self,
+        session: SessionState,
+        mode: str,
+        *,
+        auto_context_review: bool = False,
+    ) -> str:
         safe_mode = sanitize_text(mode).strip()
         if safe_mode not in {"main", "context"}:
             raise ValueError("invalid session request mode")
+        if auto_context_review and safe_mode != "context":
+            raise ValueError("automatic review must use context request mode")
 
-        with self.lock:
+        with self._request_condition:
             active_mode = sanitize_text(session.active_request_mode or "").strip()
             active_cancelled = bool(session.active_cancel_event and session.active_cancel_event.is_set())
+            active_is_auto_review = bool(
+                session.active_request_id
+                and session.active_request_id in self._auto_review_request_ids
+            )
+            if active_mode and active_cancelled and active_is_auto_review:
+                self._request_condition.wait_for(
+                    lambda: session.active_request_mode is None,
+                    timeout=30,
+                )
+                active_mode = sanitize_text(session.active_request_mode or "").strip()
+                active_cancelled = bool(session.active_cancel_event and session.active_cancel_event.is_set())
             if active_mode and active_mode != safe_mode:
                 raise ValueError("当前主聊天和上下文工作区不能并行，请等这一轮先结束。")
             if active_mode == safe_mode:
-                if active_cancelled:
-                    request_id = uuid.uuid4().hex
-                    session.active_request_id = request_id
-                    session.active_cancel_event = threading.Event()
-                    return request_id
                 if safe_mode == "main":
-                    raise ValueError("当前这条主对话还没结束。")
+                    raise ValueError("当前这条主对话还没有结束。")
                 raise ValueError("当前上下文工作区还在处理中。")
             request_id = uuid.uuid4().hex
             session.active_request_mode = safe_mode
             session.active_request_id = request_id
             session.active_cancel_event = threading.Event()
+            if auto_context_review:
+                self._auto_review_request_ids.add(request_id)
             return request_id
 
     def release_session_request(self, session: SessionState, mode: str, request_id: str | None = None) -> None:
@@ -354,13 +440,17 @@ class AppState:
         if safe_mode not in {"main", "context"}:
             return
 
-        with self.lock:
+        with self._request_condition:
             if request_id is not None and session.active_request_id != request_id:
                 return
             if session.active_request_mode == safe_mode:
+                released_request_id = session.active_request_id
                 session.active_request_mode = None
                 session.active_request_id = None
                 session.active_cancel_event = None
+                if released_request_id:
+                    self._auto_review_request_ids.discard(released_request_id)
+                self._request_condition.notify_all()
 
     def cancel_session_request(self, session: SessionState, mode: str) -> bool:
         safe_mode = sanitize_text(mode).strip()
@@ -379,6 +469,23 @@ class AppState:
                 return True
             return bool(session.active_cancel_event and session.active_cancel_event.is_set())
 
+    def cancel_auto_context_review(self, session: SessionState) -> bool:
+        with self.lock:
+            request_id = sanitize_text(session.active_request_id or "").strip()
+            if (
+                session.active_request_mode != "context"
+                or request_id not in self._auto_review_request_ids
+                or session.active_cancel_event is None
+            ):
+                return False
+            session.active_cancel_event.set()
+            return True
+
+    def prepare_interactive_request(self, session: SessionState) -> None:
+        """Give an explicit user action priority over scheduled context review work."""
+        self.cancel_scheduled_context_review(session.session_id)
+        self.cancel_auto_context_review(session)
+
     def touch_session(self, session_id: str) -> None:
         with self.lock:
             session = self.sessions.get(session_id)
@@ -390,6 +497,8 @@ class AppState:
 
     def reset_session(self, session_id: str) -> SessionState:
         session = self.get_session(session_id)
+        self.cancel_scheduled_context_review(session.session_id)
+        self.cancel_auto_context_review(session)
         with self.lock:
             session.agent.reset()
             session.title = NEW_SESSION_TITLE
@@ -397,18 +506,23 @@ class AppState:
             session.context_workbench_history = []
             session.context_revisions = []
             session.pending_context_restore = None
+            session.pending_context_review = None
+            session.usage_summary = normalize_usage_summary({}, session.session_id)
             ensure_initial_context_revision(session)
             self._save_state_locked()
         return session
 
     def truncate_session(self, session_id: str, from_index: int) -> SessionState:
         session = self.get_session(session_id)
+        self.cancel_scheduled_context_review(session.session_id)
+        self.cancel_auto_context_review(session)
         with self.lock:
             safe_index = max(0, min(from_index, len(session.transcript)))
             session.transcript = session.transcript[:safe_index]
             session.context_workbench_history = []
             session.context_revisions = []
             session.pending_context_restore = None
+            session.pending_context_review = None
             ensure_initial_context_revision(session)
             self._hydrate_agent_locked(session)
             if not session.transcript:
@@ -422,10 +536,11 @@ class AppState:
         message_index: int,
     ) -> SessionState:
         session = self.get_session(session_id)
+        self.cancel_scheduled_context_review(session.session_id)
         with self.lock:
             normalized_transcript = normalize_transcript(session.transcript)
             if not normalized_transcript:
-                raise ValueError("当前没有可删除的消息")
+                raise ValueError("褰撳墠娌℃湁鍙垹闄ょ殑娑堟伅")
 
             safe_index = int(message_index)
             if safe_index < 0 or safe_index >= len(normalized_transcript):
@@ -436,6 +551,7 @@ class AppState:
                 for index, record in enumerate(normalized_transcript)
                 if index != safe_index
             ]
+            session.pending_context_review = None
             ensure_initial_context_revision(session)
             sync_active_context_revision_snapshot(session)
             self._hydrate_agent_locked(session)
@@ -446,6 +562,8 @@ class AppState:
 
     def delete_session(self, session_id: str) -> SessionState:
         session = self.get_session(session_id)
+        self.cancel_scheduled_context_review(session.session_id)
+        self.cancel_auto_context_review(session)
         with self.lock:
             self.sessions.pop(session.session_id, None)
             self._remove_session_from_lists_locked(session.session_id)
@@ -468,10 +586,18 @@ class AppState:
             project = self.projects.pop(project_index)
             deleted_session_ids = list(project.session_ids)
             for session_id in deleted_session_ids:
-                self.sessions.pop(session_id, None)
+                session = self.sessions.pop(session_id, None)
+                if (
+                    session is not None
+                    and session.active_request_id in self._auto_review_request_ids
+                    and session.active_cancel_event is not None
+                ):
+                    session.active_cancel_event.set()
 
             self._save_state_locked()
-            return project, deleted_session_ids
+        for session_id in deleted_session_ids:
+            self.cancel_scheduled_context_review(session_id)
+        return project, deleted_session_ids
 
     def rename_session_from_message(self, session: SessionState, message: str) -> None:
         compact = summarize_title(message)
@@ -588,7 +714,7 @@ class AppState:
         with self.lock:
             normalized_history = normalize_context_chat_history(session.context_workbench_history)
             if not normalized_history:
-                raise ValueError("当前没有可删除的手动消息")
+                raise ValueError("褰撳墠娌℃湁鍙垹闄ょ殑鎵嬪姩娑堟伅")
 
             safe_index = int(message_index)
             if safe_index < 0 or safe_index >= len(normalized_history):
@@ -634,11 +760,13 @@ class AppState:
         revision_summary: str,
         operations: list[dict[str, object]],
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
+        self.cancel_scheduled_context_review(session.session_id)
         with self.lock:
             ensure_initial_context_revision(session)
             next_revision_number = next_context_revision_number(session.context_revisions)
             session.transcript = normalize_transcript(transcript)
             session.pending_context_restore = None
+            session.pending_context_review = None
             mark_active_context_revision(session.context_revisions, None)
             session.context_revisions.append(
                 build_context_revision_entry(
@@ -663,6 +791,7 @@ class AppState:
         session: SessionState,
         revision_id: str,
     ) -> tuple[list[dict[str, object]], list[dict[str, str]], list[dict[str, object]], dict[str, object]]:
+        self.cancel_scheduled_context_review(session.session_id)
         with self.lock:
             safe_revision_id = sanitize_text(revision_id).strip()
             target = next(
@@ -695,6 +824,7 @@ class AppState:
             }
             session.transcript = snapshot
             session.context_workbench_history = workbench_history_snapshot
+            session.pending_context_review = None
             mark_active_context_revision(session.context_revisions, safe_revision_id)
             sync_active_context_revision_snapshot(session)
             self._hydrate_agent_locked(session)
@@ -710,6 +840,7 @@ class AppState:
         self,
         session: SessionState,
     ) -> tuple[list[dict[str, object]], list[dict[str, str]], list[dict[str, object]], dict[str, object] | None]:
+        self.cancel_scheduled_context_review(session.session_id)
         with self.lock:
             pending_restore = session.pending_context_restore
             if not isinstance(pending_restore, dict):
@@ -723,6 +854,7 @@ class AppState:
             session.transcript = undo_transcript
             session.context_workbench_history = undo_context_workbench_history
             session.pending_context_restore = None
+            session.pending_context_review = None
             mark_active_context_revision(session.context_revisions, undo_active_revision_id or None)
             sync_active_context_revision_snapshot(session)
             self._hydrate_agent_locked(session)
@@ -733,6 +865,189 @@ class AppState:
                 context_revision_summaries(session.context_revisions),
                 None,
             )
+
+    def context_review_payload(self, session: SessionState) -> dict[str, object] | None:
+        with self.lock:
+            return pending_context_review_payload(session.pending_context_review)
+
+    def session_usage_payload(self, session: SessionState) -> dict[str, object]:
+        with self.lock:
+            return usage_summary_payload(session.usage_summary, session.session_id)
+
+    def record_usage_records(
+        self,
+        session: SessionState,
+        kind: str,
+        records: list[dict[str, Any]],
+    ) -> dict[str, object]:
+        if not records:
+            return self.session_usage_payload(session)
+        with self.lock:
+            if self.sessions.get(session.session_id) is not session:
+                return usage_summary_payload(session.usage_summary, session.session_id)
+            summary: dict[str, object] = normalize_usage_summary(
+                session.usage_summary,
+                session.session_id,
+            )
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                summary = add_provider_usage(
+                    summary,
+                    session_id=session.session_id,
+                    kind=kind,
+                    model=sanitize_text(record.get("model") or "").strip(),
+                    raw_usage=record.get("usage"),
+                )
+            session.usage_summary = summary
+            self._save_state_locked()
+            return usage_summary_payload(summary, session.session_id)
+
+    def record_agent_usage(self, session: SessionState, kind: str = "main") -> dict[str, object]:
+        pop_records = getattr(session.agent, "pop_usage_records", None)
+        records = pop_records() if callable(pop_records) else []
+        return self.record_usage_records(session, kind, records)
+
+    def reset_session_usage(self, session: SessionState) -> dict[str, object]:
+        with self.lock:
+            session.usage_summary = normalize_usage_summary({}, session.session_id)
+            self._save_state_locked()
+            return usage_summary_payload(session.usage_summary, session.session_id)
+
+    def discard_context_review(
+        self,
+        session: SessionState,
+        review_id: str | None = None,
+    ) -> None:
+        safe_review_id = sanitize_text(review_id or "").strip()
+        with self.lock:
+            current = normalize_pending_context_review(session.pending_context_review)
+            if safe_review_id and current is not None and current["id"] != safe_review_id:
+                raise ValueError("context review not found")
+            if session.pending_context_review is None:
+                return
+            session.pending_context_review = None
+            self._save_state_locked()
+
+    def store_context_review(
+        self,
+        session: SessionState,
+        review: dict[str, object],
+    ) -> dict[str, object]:
+        normalized = normalize_pending_context_review(review)
+        if normalized is None:
+            raise ValueError("context review is invalid")
+        with self.lock:
+            if context_transcript_fingerprint(session.transcript) != normalized["base_context_fingerprint"]:
+                raise ValueError("context changed while the suggestion was being generated")
+            session.pending_context_review = normalized
+            self._save_state_locked()
+            return sanitize_value(normalized)
+
+    def apply_context_review(
+        self,
+        session: SessionState,
+        review_id: str,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
+        safe_review_id = sanitize_text(review_id).strip()
+        self.cancel_scheduled_context_review(session.session_id)
+        with self.lock:
+            review = normalize_pending_context_review(session.pending_context_review)
+            if review is None or review["id"] != safe_review_id:
+                raise ValueError("context review not found")
+            if context_transcript_fingerprint(session.transcript) != review["base_context_fingerprint"]:
+                session.pending_context_review = None
+                self._save_state_locked()
+                raise ValueError("这条建议已经过期，因为当前上下文发生了变化。请重新分析。")
+
+            proposed_transcript = normalize_transcript(review["proposed_transcript"])
+            if not proposed_transcript:
+                raise ValueError("context review transcript is unavailable")
+            ensure_initial_context_revision(session)
+            revision_number = next_context_revision_number(session.context_revisions)
+            session.transcript = proposed_transcript
+            session.pending_context_restore = None
+            session.pending_context_review = None
+            mark_active_context_revision(session.context_revisions, None)
+            session.context_revisions.append(
+                build_context_revision_entry(
+                    transcript=session.transcript,
+                    context_workbench_history=session.context_workbench_history,
+                    revision_label="应用上下文建议",
+                    revision_summary=sanitize_text(review.get("summary") or "").strip()
+                    or "应用了上下文模型的整理建议。",
+                    operations=review.get("operations") if isinstance(review.get("operations"), list) else [],
+                    revision_number=revision_number,
+                )
+            )
+            self._hydrate_agent_locked(session)
+            self._save_state_locked()
+            return (
+                sanitize_value(session.transcript),
+                context_revision_summaries(session.context_revisions),
+                None,
+            )
+
+    def cancel_scheduled_context_review(self, session_id: str) -> None:
+        with self._context_review_timer_lock:
+            timer = self._context_review_timers.pop(session_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def schedule_context_review(self, session: SessionState, *, delay_seconds: float | None = None) -> None:
+        self.cancel_scheduled_context_review(session.session_id)
+        if not self.settings.context_review_auto_enabled:
+            return
+        delay = (
+            max(1.0, float(delay_seconds))
+            if delay_seconds is not None
+            else max(1.0, float(self.settings.context_review_interval_minutes) * 60.0)
+        )
+        timer = threading.Timer(delay, self._run_scheduled_context_review, args=(session.session_id,))
+        timer.daemon = True
+        timer.name = f"hash-context-review-{session.session_id[:8]}"
+        with self._context_review_timer_lock:
+            self._context_review_timers[session.session_id] = timer
+        timer.start()
+
+    def _run_scheduled_context_review(self, session_id: str) -> None:
+        with self._context_review_timer_lock:
+            self._context_review_timers.pop(session_id, None)
+        if not self.settings.context_review_auto_enabled:
+            return
+        try:
+            session = self.get_session(session_id)
+        except ValueError:
+            return
+        with self.lock:
+            if session.pending_context_review is not None or len(session.transcript) < 2:
+                return
+        try:
+            request_id = self.acquire_session_request(
+                session,
+                "context",
+                auto_context_review=True,
+            )
+        except ValueError:
+            self.schedule_context_review(session, delay_seconds=30)
+            return
+        try:
+            def check_cancelled() -> None:
+                if self.is_session_request_cancelled(session, request_id):
+                    raise RequestCancelledError()
+
+            generate_context_review(
+                self,
+                session,
+                source="auto_idle",
+                check_cancelled=check_cancelled,
+            )
+        except RequestCancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"context review generation error: {type(exc).__name__}: {exc}")
+        finally:
+            self.release_session_request(session, "context", request_id)
 
     def append_turn(
         self,
@@ -747,6 +1062,7 @@ class AppState:
     ) -> None:
         with self.lock:
             session.pending_context_restore = None
+            session.pending_context_review = None
             safe_user_message = sanitize_text(user_message)
             safe_user_attachments = normalize_attachment_records(user_attachments)
             user_record_index = len(session.transcript)
@@ -820,6 +1136,7 @@ class AppState:
                 "context_workbench_histories": self._context_workbench_history_map_locked(),
                 "context_revision_histories": self._context_revision_map_locked(),
                 "pending_context_restores": self._pending_context_restore_map_locked(),
+                "pending_context_reviews": self._pending_context_review_map_locked(),
             }
 
     def sidebar_payload(self) -> dict[str, object]:
@@ -886,12 +1203,14 @@ class AppState:
                     title=sanitize_text(item.get("title") or NEW_SESSION_TITLE).strip() or NEW_SESSION_TITLE,
                     scope=scope,
                     project_id=project_id if scope == "project" else None,
-                    agent=SimpleAgent(self._settings_for_project_locked(project_id if scope == "project" else None)),
+                    agent=SessionAgent(self._settings_for_project_locked(project_id if scope == "project" else None)),
                     transcript=transcript,
                     context_input=[],
                     context_workbench_history=normalize_context_chat_history(item.get("context_workbench_history")),
                     context_revisions=normalize_context_revision_entries(item.get("context_revisions")),
                     pending_context_restore=normalize_pending_context_restore(item.get("pending_context_restore")),
+                    pending_context_review=normalize_pending_context_review(item.get("pending_context_review")),
+                    usage_summary=normalize_usage_summary(item.get("usage_summary"), session_id),
                 )
                 self._hydrate_agent_locked(session)
                 self.sessions[safe_session_id] = session
@@ -992,6 +1311,8 @@ class AppState:
                     "context_workbench_history": sanitize_value(session.context_workbench_history),
                     "context_revisions": sanitize_value(session.context_revisions),
                     "pending_context_restore": sanitize_value(session.pending_context_restore),
+                    "pending_context_review": sanitize_value(session.pending_context_review),
+                    "usage_summary": sanitize_value(session.usage_summary),
                 }
                 for session_id, session in self.sessions.items()
             },
@@ -1065,6 +1386,13 @@ class AppState:
             session_id: context_pending_restore_payload(session.pending_context_restore)
             for session_id, session in self.sessions.items()
             if session.pending_context_restore
+        }
+
+    def _pending_context_review_map_locked(self) -> dict[str, dict[str, object]]:
+        return {
+            session_id: payload
+            for session_id, session in self.sessions.items()
+            if (payload := pending_context_review_payload(session.pending_context_review)) is not None
         }
 
     def _chat_sessions_payload_locked(self) -> list[dict[str, object]]:
@@ -1205,7 +1533,7 @@ def clean_generated_title(raw_title: str) -> str:
 
     cleaned = first_line.strip(" \t\r\n\"'`“”‘’「」『』《》")
     cleaned = re.sub(r"^(标题|对话标题)\s*[:：]\s*", "", cleaned).strip()
-    cleaned = cleaned.rstrip("。.!！?？")
+    cleaned = cleaned.rstrip("。？！?!：:")
     if not cleaned or cleaned == NEW_SESSION_TITLE:
         return ""
     if len(cleaned) <= 18:
@@ -1224,7 +1552,7 @@ def generate_session_title(
     if not safe_message:
         return fallback_title
 
-    title_agent = SimpleAgent(settings)
+    title_agent = SessionAgent(settings)
     request_model = sanitize_text(model or settings.model).strip() or settings.model
     title_prompt = "\n".join(
         [
@@ -1239,7 +1567,7 @@ def generate_session_title(
             model=request_model,
             instructions=TITLE_GENERATION_INSTRUCTIONS,
             input=[
-                SimpleAgent._message(
+                SessionAgent._message(
                     "user",
                     title_prompt,
                 )
@@ -1310,6 +1638,8 @@ def context_workbench_settings_payload(settings: Settings) -> dict[str, object]:
         or "openai",
         "context_token_warning_threshold": int(settings.context_token_warning_threshold or 5000),
         "context_token_critical_threshold": int(settings.context_token_critical_threshold or 10000),
+        "context_review_auto_enabled": bool(settings.context_review_auto_enabled),
+        "context_review_interval_minutes": int(settings.context_review_interval_minutes or 10),
     }
 
 
@@ -1459,7 +1789,7 @@ def response_output_to_turn_items(response: Any) -> tuple[list[dict[str, Any]], 
 
             message_text = "".join(text_parts)
             if message_text.strip():
-                turn_items.append(SimpleAgent._message(role, message_text))
+                turn_items.append(SessionAgent._message(role, message_text))
             continue
 
         if item_type == "function_call":
@@ -1485,11 +1815,11 @@ def build_context_chat_runtime(
     safe_selected_indexes = normalize_selected_node_indexes(selected_indexes or [], len(session.transcript))
     draft = ContextWorkbenchDraft(normalize_transcript(session.transcript), safe_selected_indexes)
     snapshot = build_context_workspace_snapshot(session, selected_indexes=safe_selected_indexes)
-    tool_registry = ContextWorkbenchToolRegistry(draft)
+    tool_registry = ContextWorkbenchToolRegistry(draft, session.title)
     history = prepare_context_chat_history_for_model(session.context_workbench_history)
 
     context_input: list[dict[str, Any]] = [
-        SimpleAgent._message(
+        SessionAgent._message(
             "user",
             "\n\n".join(
                 [
@@ -1502,14 +1832,14 @@ def build_context_chat_runtime(
 
     for item in history:
         context_input.append(
-            SimpleAgent._message(
+            SessionAgent._message(
                 item["role"],
                 item["content"],
             )
         )
 
     context_input.append(
-        SimpleAgent._message(
+        SessionAgent._message(
             "user",
             sanitize_text(message),
         )
@@ -1520,27 +1850,57 @@ def build_context_chat_runtime(
     ).strip() or "gpt-5.4-mini"
     instructions = "\n".join(
         [
-            "你在右侧手动页里工作，这里是一个独立聊天窗口。",
-            "默认先像正常聊天助手一样回应用户当前这句话，不要先背职责，不要先讲工具。",
+            "你在右侧上下文工作区里工作，这是一个独立聊天窗口。",
+            "默认先像正常聊天助手一样回应用户当前这句话，不要先背职责，也不要先讲工具。",
             "你只处理当前上下文，不继续用户的主聊天任务。",
-            "如果用户只是打招呼、测试你能不能正常聊天、或者问这里怎么用，直接正常回答，不要调用工具。",
-            "只有在定位、核实、修改上下文时，才需要调用工具。",
-            "这一轮里所有 Node # 都只以当前快照为准。",
-            "分析类问题如果能靠全局概览直接回答，就先直接回答。",
-            "user 节点直接给全文，assistant 节点默认只给概览；需要协议层细节时，再调用 get_context_node_details。",
-            "Node Detail 里会给出 item #1 / item #2 / item #3 这样的当轮可编辑 item 视图。",
-            "如果你要删掉、改写、压缩某一段 assistant text / function_call / function_call_output，优先走 delete_context_item / replace_context_item / compress_context_item。",
-            "选中节点只用于初始快照提示你判断；工具不会自动使用选中节点。需要读取或修改节点时，必须显式传 node_numbers。",
-            "当你调用 mutation tool 时，你是在改 working snapshot，UI 会在这一轮结束后统一提交。",
-            "mutation tool 只返回本次变化 delta，不会重复返回全部节点概览；你需要基于初始快照和每次 delta 理解当前 working snapshot。",
-            "所有计划内编辑完成后，如果这一轮做过任何编辑，调用一次 confirm_working_snapshot 确认最终所有 active 节点概览；不要在每次 mutation 后调用它。",
-            "确认最终状态后，再调用一次 set_context_revision_summary，用 1 到 2 句话概括这次具体改了什么；这句会显示在恢复页。注意：总结必须说明修改了【什么具体的上下文内容】（例如“压缩了所有工具输出”或“压缩了关于计划讨论的部分”），绝对不要简单说“修改了节点”等废话。",
-            "简单删除、替换、压缩完成后，不要为了确认结果再次展开节点详情；直接依据 mutation delta 继续。只有下一步编辑确实需要修改后的完整 provider_items 时，才再次调用 get_context_node_details。",
-            "如果工具返回 target_resolution 或 item_resolution，不要硬猜；重新根据当前快照或详情明确 node_numbers / item_number 后再调用工具。",
-            "这一轮结束前，你必须给用户一个明确的答复（语言与用户沟通语言一致），不能只停在工具调用上。",
-            "回答保持简洁、具体，说人话，可以使用 Markdown。",
+            "只有在定位、核实、删除、替换或压缩上下文时，才调用上下文工具。",
+            "本轮里的 Node # 都以当前快照为准；需要读取或修改节点时，必须显式传 node_numbers。",
+            "assistant 节点在编辑前必须先用 get_nodes 读取完整内容，不能根据预览编造摘要。",
+            "节点级修改统一使用 write_nodes，并尽量在一次调用中提交完整的删除和插入计划。",
+            "只有必须保留 assistant 节点内部部分结构时，才先 get_nodes 再使用 write_items。",
+            "写工具只修改 working snapshot；本轮结束后系统会一次性提交并生成可恢复版本。",
+            "写工具返回 updated_snapshot 后先核对结果，再简洁说明改了什么和保留了什么。",
+            "回答保持简洁、具体、说人话，可以使用 Markdown。",
         ]
     )
+    return instructions, request_model, draft, tool_registry, context_input
+
+
+def build_context_review_runtime(
+    session: SessionState,
+) -> tuple[str, str, ContextWorkbenchDraft, ContextWorkbenchToolRegistry, list[dict[str, Any]]]:
+    transcript = normalize_transcript(session.transcript)
+    draft = ContextWorkbenchDraft(transcript, [])
+    snapshot = build_context_workspace_snapshot(session, selected_indexes=[])
+    tool_registry = ContextWorkbenchToolRegistry(draft, session.title, review_mode=True)
+    request_model = sanitize_text(
+        session.agent.settings.context_workbench_model or session.agent.settings.model
+    ).strip() or "gpt-5.4-mini"
+    instructions = "\n".join(
+        [
+            "你是 HashCode 的上下文维护 Agent，现在只生成一份待用户审核的整理提案。",
+            "不要继续主聊天任务，也不要直接修改正式上下文。",
+            "保守、选择性地整理：保留当前目标、近期工作集、用户约束、已确认决策、未完成工作和未来仍需引用的证据。",
+            "优先处理已经完成或被替代的阶段、重复输出、已纠正错误、放弃的方法和明显过期的探索。",
+            "信心不足就保留原内容；不要为了缩短而压缩干净连贯的对话，也不要默认把全文折叠成一个摘要。",
+            "assistant 节点的预览不足以支持安全摘要；自动建议不能展开详情，因此只有从快照已有信息就能安全判断时才整理。",
+            "如果没有明确且安全的收益，不调用工具，直接回答 NO_CHANGE。",
+            "如果值得整理，只调用一次 write_nodes，提交完整删除和插入计划，并提供面向用户的 review_rationale。",
+            "review_rationale 使用建议语气，说明建议整理什么、为什么与当前任务有关、保留了什么以及存在什么风险。",
+            "review_rationale 不得提节点编号、Token、工具名或草稿机制。",
+        ]
+    )
+    context_input = [
+        SessionAgent._message(
+            "user",
+            "\n\n".join(
+                [
+                    "请审查下面的当前上下文，并按规则决定是否提出整理建议：",
+                    snapshot,
+                ]
+            ),
+        )
+    ]
     return instructions, request_model, draft, tool_registry, context_input
 
 
@@ -1600,7 +1960,7 @@ def resolve_context_workbench_provider_id(settings: Settings, model_id: str) -> 
     return next(iter(enabled_provider_ids), active_provider_id or "openai")
 
 
-def build_context_workbench_agent(settings: Settings, provider_id: str) -> SimpleAgent:
+def build_context_workbench_agent(settings: Settings, provider_id: str) -> SessionAgent:
     resolved_provider_id = sanitize_text(provider_id).strip() or sanitize_text(settings.active_provider_id).strip() or "openai"
     provider = next(
         (
@@ -1634,7 +1994,7 @@ def build_context_workbench_agent(settings: Settings, provider_id: str) -> Simpl
         user_timezone="",
         user_profile="",
     )
-    return SimpleAgent(scoped_settings, include_default_instructions=False)
+    return SessionAgent(scoped_settings, include_default_instructions=False)
 
 
 def run_context_chat_turn(
@@ -1647,17 +2007,21 @@ def run_context_chat_turn(
     on_round_reset: Callable[[], None] | None = None,
     on_tool_event: Callable[[ToolEvent], None] | None = None,
     check_cancelled: Callable[[], None] | None = None,
-) -> tuple[str, str, ContextWorkbenchDraft, list[ToolEvent]]:
-    instructions, request_model, draft, tool_registry, context_input = build_context_chat_runtime(
-        session,
-        message=message,
-        selected_indexes=selected_indexes,
-    )
+    review_mode: bool = False,
+) -> tuple[str, str, ContextWorkbenchDraft, list[ToolEvent], list[dict[str, Any]]]:
+    if review_mode:
+        instructions, request_model, draft, tool_registry, context_input = build_context_review_runtime(session)
+    else:
+        instructions, request_model, draft, tool_registry, context_input = build_context_chat_runtime(
+            session,
+            message=message,
+            selected_indexes=selected_indexes,
+        )
     context_provider_id = resolve_context_workbench_provider_id(session.agent.settings, request_model)
     context_agent = build_context_workbench_agent(session.agent.settings, context_provider_id)
     tool_events: list[ToolEvent] = []
     readonly_tool_result_cache: dict[str, str] = {}
-    readonly_tool_cache_names = {"get_context_node_details", "confirm_working_snapshot"}
+    readonly_tool_cache_names = {"get_nodes"}
 
     round_count = 0
     while True:
@@ -1671,7 +2035,7 @@ def run_context_chat_turn(
                 "model": request_model,
                 "input": sanitize_value(
                     [
-                        SimpleAgent._message(context_agent.context_role, instructions),
+                        SessionAgent._message(context_agent.context_role, instructions),
                         *context_input,
                     ]
                 ),
@@ -1684,7 +2048,7 @@ def run_context_chat_turn(
                 request_model=request_model,
                 round_count=round_count,
                 request=request,
-                note="context_workbench_request",
+                note="context_review_request" if review_mode else "context_workbench_request",
             )
             return request
 
@@ -1714,7 +2078,13 @@ def run_context_chat_turn(
                 raise RuntimeError(error_msg)
             if check_cancelled is not None:
                 check_cancelled()
-            return final_answer, request_model, draft, tool_events
+            return (
+                final_answer,
+                request_model,
+                draft,
+                tool_events,
+                context_agent.pop_usage_records(),
+            )
 
         if response.output_text and on_round_reset is not None:
             if check_cancelled is not None:
@@ -1824,13 +2194,57 @@ def create_context_chat_answer(
     selected_indexes: list[int] | None = None,
     reasoning_effort: str | None = None,
 ) -> tuple[str, str, ContextWorkbenchDraft]:
-    answer, request_model, draft, _tool_events = run_context_chat_turn(
+    answer, request_model, draft, _tool_events, _usage_records = run_context_chat_turn(
         session,
         message=message,
         selected_indexes=selected_indexes,
         reasoning_effort=reasoning_effort,
     )
     return answer, request_model, draft
+
+
+def generate_context_review(
+    app_state: AppState,
+    session: SessionState,
+    *,
+    source: str = "manual",
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict[str, object] | None:
+    transcript = normalize_transcript(session.transcript)
+    if len(transcript) < 2:
+        return None
+    base_fingerprint = context_transcript_fingerprint(transcript)
+    _answer, used_model, draft, _tool_events, usage_records = run_context_chat_turn(
+        session,
+        message="",
+        selected_indexes=[],
+        reasoning_effort=session.agent.settings.default_reasoning_effort,
+        check_cancelled=check_cancelled,
+        review_mode=True,
+    )
+    app_state.record_usage_records(session, "context_workbench", usage_records)
+    if check_cancelled is not None:
+        check_cancelled()
+    if not draft.has_changes:
+        return None
+
+    proposed_transcript = draft.committed_transcript()
+    if context_transcript_fingerprint(proposed_transcript) == base_fingerprint:
+        return None
+    review = {
+        "id": uuid.uuid4().hex,
+        "session_id": session.session_id,
+        "source": "auto_idle" if source == "auto_idle" else "manual",
+        "created_at": utc_timestamp(),
+        "summary": draft.revision_summary(),
+        "model": used_model,
+        "base_context_fingerprint": base_fingerprint,
+        "before": context_transcript_stats(transcript),
+        "after": context_transcript_stats(proposed_transcript),
+        "proposed_transcript": proposed_transcript,
+        "operations": sanitize_value(draft.operations),
+    }
+    return app_state.store_context_review(session, review)
 
 
 def build_context_chat_response_payload(
@@ -2047,6 +2461,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("message_index must be a number") from exc
 
                 session = self.app_state.get_session(session_id)
+                self.app_state.prepare_interactive_request(session)
                 request_id = self.app_state.acquire_session_request(session, "main")
                 try:
                     session = self.app_state.delete_transcript_message(session_id, message_index)
@@ -2089,16 +2504,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                     user_locale=payload.get("user_locale") if isinstance(payload.get("user_locale"), str) else None,
                     user_timezone=payload.get("user_timezone") if isinstance(payload.get("user_timezone"), str) else None,
                     user_profile=payload.get("user_profile") if isinstance(payload.get("user_profile"), str) else None,
-                    theme_color=payload.get("theme_color") if isinstance(payload.get("theme_color"), str) else None,
                     theme_mode=payload.get("theme_mode") if isinstance(payload.get("theme_mode"), str) else None,
-                    background_color=payload.get("background_color") if isinstance(payload.get("background_color"), str) else None,
-                    ui_font=payload.get("ui_font") if isinstance(payload.get("ui_font"), str) else None,
-                    code_font=payload.get("code_font") if isinstance(payload.get("code_font"), str) else None,
-                    ui_font_size=payload.get("ui_font_size") if type(payload.get("ui_font_size")) is int else None,
-                    code_font_size=payload.get("code_font_size") if type(payload.get("code_font_size")) is int else None,
-                    appearance_contrast=payload.get("appearance_contrast")
-                    if type(payload.get("appearance_contrast")) is int
-                    else None,
                     service_hints_enabled=bool(payload.get("service_hints_enabled"))
                     if "service_hints_enabled" in payload
                     else None,
@@ -2171,7 +2577,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                 if provider is None and not preview_only:
                     raise ValueError("provider_id is invalid")
                 if provider is not None and not bool(provider.get("supports_model_fetch")):
-                    raise ValueError("这个供应商暂时不支持拉取模型列表")
+                    raise ValueError("杩欎釜渚涘簲鍟嗘殏鏃朵笉鏀寔鎷夊彇妯″瀷鍒楄〃")
 
                 request_base_url = sanitize_text(
                     payload.get("api_base_url") or (provider.get("api_base_url") if provider else "") or ""
@@ -2255,6 +2661,10 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                     or None,
                     context_token_warning_threshold=payload.get("context_token_warning_threshold"),
                     context_token_critical_threshold=payload.get("context_token_critical_threshold"),
+                    context_review_auto_enabled=bool(payload.get("context_review_auto_enabled"))
+                    if "context_review_auto_enabled" in payload
+                    else None,
+                    context_review_interval_minutes=payload.get("context_review_interval_minutes"),
                 )
                 self.app_state.refresh_settings(updated_settings)
                 settings_data = settings_payload(updated_settings)
@@ -2271,10 +2681,65 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if parsed.path == "/api/context-workbench-suggestions":
+            if parsed.path == "/api/context-review":
                 session = self.app_state.get_session(payload.get("session_id"))
-                self._send_json(context_workbench_suggestions_payload(session))
-                return
+                action = sanitize_text(payload.get("action") or "status").strip() or "status"
+                if action == "status":
+                    self._send_json({"review": self.app_state.context_review_payload(session)})
+                    return
+                if action == "discard":
+                    self.app_state.cancel_scheduled_context_review(session.session_id)
+                    self.app_state.discard_context_review(
+                        session,
+                        sanitize_text(payload.get("review_id") or "").strip() or None,
+                    )
+                    self._send_json({"review": None})
+                    return
+                if action == "generate":
+                    self.app_state.prepare_interactive_request(session)
+                    request_id = self.app_state.acquire_session_request(session, "context")
+                    try:
+                        review = generate_context_review(self.app_state, session, source="manual")
+                        self._send_json({"review": review})
+                    finally:
+                        self.app_state.release_session_request(session, "context", request_id)
+                    return
+                if action == "apply":
+                    review_id = sanitize_text(payload.get("review_id") or "").strip()
+                    if not review_id:
+                        raise ValueError("review_id is required")
+                    self.app_state.prepare_interactive_request(session)
+                    request_id = self.app_state.acquire_session_request(session, "context")
+                    try:
+                        conversation, revisions, pending_restore = self.app_state.apply_context_review(
+                            session,
+                            review_id,
+                        )
+                        self._send_json(
+                            {
+                                "review": None,
+                                "conversation": conversation,
+                                "context_input": sanitize_value(session.context_input),
+                                "history": sanitize_value(session.context_workbench_history),
+                                "revisions": revisions,
+                                "pending_restore": pending_restore,
+                            }
+                        )
+                    finally:
+                        self.app_state.release_session_request(session, "context", request_id)
+                    return
+                raise ValueError("invalid context review action")
+
+            if parsed.path == "/api/session-usage":
+                session = self.app_state.get_session(payload.get("session_id"))
+                action = sanitize_text(payload.get("action") or "status").strip() or "status"
+                if action == "status":
+                    self._send_json({"summary": self.app_state.session_usage_payload(session)})
+                    return
+                if action == "reset":
+                    self._send_json({"summary": self.app_state.reset_session_usage(session)})
+                    return
+                raise ValueError("invalid session usage action")
 
             if parsed.path == "/api/delete-session":
                 session_id = sanitize_text(payload.get("session_id", "")).strip()
@@ -2310,6 +2775,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-chat":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 message = sanitize_text(payload.get("message", "")).strip()
                 if not message:
                     raise ValueError("message is required")
@@ -2323,12 +2789,13 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                 )
                 request_id = self.app_state.acquire_session_request(session, "context")
                 try:
-                    answer, used_model, draft, tool_events = run_context_chat_turn(
+                    answer, used_model, draft, tool_events, usage_records = run_context_chat_turn(
                         session,
                         message=message,
                         selected_indexes=selected_indexes,
                         reasoning_effort=reasoning_effort,
                     )
+                    self.app_state.record_usage_records(session, "context_workbench", usage_records)
                     self._send_json(
                         build_context_chat_response_payload(
                             self.app_state,
@@ -2346,6 +2813,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-chat-stream":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 message = sanitize_text(payload.get("message", "")).strip()
                 if not message:
                     raise ValueError("message is required")
@@ -2390,7 +2858,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                     self._write_stream_event({"type": "reset"})
 
                 try:
-                    answer, used_model, draft, tool_events = run_context_chat_turn(
+                    answer, used_model, draft, tool_events, usage_records = run_context_chat_turn(
                         session,
                         message=message,
                         selected_indexes=selected_indexes,
@@ -2400,6 +2868,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         on_tool_event=handle_tool_event,
                         check_cancelled=raise_if_cancelled,
                     )
+                    self.app_state.record_usage_records(session, "context_workbench", usage_records)
                     raise_if_cancelled()
                     payload_data = build_context_chat_response_payload(
                         self.app_state,
@@ -2419,7 +2888,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         self._write_stream_event(
                             {
                                 "type": "error",
-                                "error": sanitize_text(str(exc) or "服务异常"),
+                                "error": sanitize_text(str(exc) or "鏈嶅姟寮傚父"),
                             }
                         )
                     except ClientDisconnectedError:
@@ -2430,6 +2899,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-restore":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 revision_id = sanitize_text(payload.get("revision_id") or "").strip()
                 if not revision_id:
                     raise ValueError("revision_id is required")
@@ -2455,6 +2925,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-workbench-history-message-delete":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 raw_message_index = payload.get("message_index")
                 try:
                     message_index = int(raw_message_index)
@@ -2482,6 +2953,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-workbench-history-clear":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 request_id = self.app_state.acquire_session_request(session, "context")
                 try:
                     conversation, history, revisions, pending_restore = self.app_state.clear_context_workbench_history(
@@ -2502,6 +2974,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/context-undo-restore":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
                 request_id = self.app_state.acquire_session_request(session, "context")
                 try:
                     conversation, history, revisions, pending_restore = self.app_state.undo_context_restore(session)
@@ -2520,6 +2993,8 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/send-message-stream":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
+                self.app_state.discard_context_review(session)
                 message = sanitize_text(payload.get("message", "")).strip()
                 transcript_attachments, agent_attachments = persist_request_attachments(payload.get("attachments"))
                 if not message and not transcript_attachments:
@@ -2678,6 +3153,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         assistant_blocks=interrupted_blocks,
                         user_attachments=transcript_attachments,
                     )
+                    self.app_state.schedule_context_review(session)
                     turn_persisted = True
 
                 def handle_model_start() -> None:
@@ -2769,6 +3245,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         assistant_provider_items=assistant_provider_items,
                         user_attachments=transcript_attachments,
                     )
+                    self.app_state.schedule_context_review(session)
                     turn_persisted = True
                     self._write_stream_event(
                         {
@@ -2788,17 +3265,20 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         self._write_stream_event(
                             {
                                 "type": "error",
-                                "error": sanitize_text(str(exc) or "服务异常"),
+                                "error": sanitize_text(str(exc) or "鏈嶅姟寮傚父"),
                             }
                         )
                     except ClientDisconnectedError:
                         pass
                 finally:
+                    self.app_state.record_agent_usage(session, "main")
                     self.app_state.release_session_request(session, "main", request_id)
                 return
 
             if parsed.path == "/api/send-message":
                 session = self.app_state.get_session(payload.get("session_id"))
+                self.app_state.prepare_interactive_request(session)
+                self.app_state.discard_context_review(session)
                 message = sanitize_text(payload.get("message", "")).strip()
                 transcript_attachments, agent_attachments = persist_request_attachments(payload.get("attachments"))
                 if not message and not transcript_attachments:
@@ -2851,6 +3331,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         assistant_provider_items=assistant_provider_items,
                         user_attachments=transcript_attachments,
                     )
+                    self.app_state.schedule_context_review(session)
                     self._send_json(
                         {
                             "answer": display_answer,
@@ -2862,6 +3343,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
                         }
                     )
                 finally:
+                    self.app_state.record_agent_usage(session, "main")
                     self.app_state.release_session_request(session, "main", request_id)
                 return
 
@@ -2869,7 +3351,7 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:  # noqa: BLE001
-            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, sanitize_text(str(exc) or "服务异常"))
+            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, sanitize_text(str(exc) or "鏈嶅姟寮傚父"))
 
     def _serve_static(self, request_path: str) -> None:
         normalized_path = request_path or "/"
@@ -2885,13 +3367,13 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
         elif normalized_path.startswith(f"/{ATTACHMENTS_ROUTE}/"):
             file_path = resolve_attachment_file_path(normalized_path)
             if file_path is None:
-                self._send_error_json(HTTPStatus.FORBIDDEN, "不允许访问该路径")
+                self._send_error_json(HTTPStatus.FORBIDDEN, "涓嶅厑璁歌闂璺緞")
                 return
         else:
             relative_path = normalized_path.lstrip("/")
             file_path = (REPO_ROOT / relative_path).resolve()
             if REPO_ROOT not in file_path.parents and file_path != REPO_ROOT:
-                self._send_error_json(HTTPStatus.FORBIDDEN, "不允许访问该路径")
+                self._send_error_json(HTTPStatus.FORBIDDEN, "涓嶅厑璁歌闂璺緞")
                 return
 
         if not file_path.exists() or not file_path.is_file():
@@ -2951,16 +3433,16 @@ class HashHTTPRequestHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(raw_length)
         except ValueError as exc:
-            raise ValueError("Content-Length 非法") from exc
+            raise ValueError("Content-Length 闈炴硶") from exc
 
         raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
         try:
             payload = json.loads(raw_body.decode("utf-8"))
         except json.JSONDecodeError as exc:
-            raise ValueError("请求体不是合法 JSON") from exc
+            raise ValueError("璇锋眰浣撲笉鏄悎娉?JSON") from exc
 
         if not isinstance(payload, dict):
-            raise ValueError("请求体必须是 JSON 对象")
+            raise ValueError("璇锋眰浣撳繀椤绘槸 JSON 瀵硅薄")
         return payload
 
     def _send_json(self, payload: dict[str, object], *, status: HTTPStatus = HTTPStatus.OK) -> None:

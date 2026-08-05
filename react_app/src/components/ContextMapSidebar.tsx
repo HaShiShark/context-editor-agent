@@ -219,11 +219,16 @@ export default function ContextMapSidebar({
   const [nodeLayouts, setNodeLayouts] = useState<NodeLayout[]>([]);
   const [scrollMetrics, setScrollMetrics] = useState<ScrollMetrics>(DEFAULT_SCROLL_METRICS);
   const [tokenThresholds, setTokenThresholds] = useState<ContextTokenThresholds>(DEFAULT_CONTEXT_TOKEN_THRESHOLDS);
+  const [isContextReviewPreviewActive, setIsContextReviewPreviewActive] = useState(false);
   const [visibleStage, setVisibleStage] = useState<0 | 1 | 2>(0);
   const mountedRef = useRef(false);
   const mountAnimFrameRef = useRef<number | null>(null);
 
   // animate-in on mount: render as stage-0 first frame, then jump to real stage so CSS transition fires
+  useEffect(() => {
+    setIsContextReviewPreviewActive(false);
+  }, [sessionId]);
+
   useEffect(() => {
     if (stage === 0) {
       setVisibleStage(0);
@@ -955,6 +960,13 @@ export default function ContextMapSidebar({
           </div>
         </div>
 
+        {isContextReviewPreviewActive ? (
+          <div className="context-review-preview-banner" role="status">
+            <i className="ph-light ph-eye" />
+            <span>建议预览中 · 正式上下文尚未改变</span>
+          </div>
+        ) : null}
+
         <div className="context-map-list">
           <div className="context-map-scroll-shell" ref={scrollRef}>
             <div className="context-map-list-inner">
@@ -1110,9 +1122,7 @@ export default function ContextMapSidebar({
         {stage === 2 ? (
           <ContextWorkbench
             messages={messages}
-            messageTokenStats={messageStats}
             selectedNodeIndexes={selectedNodeIndexes}
-            criticalNodeIndexes={criticalNodeIndexes}
             tokenThresholds={tokenThresholds}
             sessionId={sessionId}
             isMainChatBusy={isMainChatBusy}
@@ -1125,6 +1135,7 @@ export default function ContextMapSidebar({
             onContextInputChange={onContextInputChange}
             onRevisionHistoryChange={onContextRevisionHistoryChange}
             onPendingRestoreChange={onPendingContextRestoreChange}
+            onReviewPreviewStateChange={setIsContextReviewPreviewActive}
             onEnsureSession={onEnsureSession}
             onTokenThresholdsChange={setTokenThresholdsSafe}
           />

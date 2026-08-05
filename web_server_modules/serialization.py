@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
-from simple_agent.agent import sanitize_text
+from app_agent.session_agent import sanitize_text
 
 
 def sanitize_value(value: Any) -> Any:
@@ -18,3 +18,4 @@ def sanitize_value(value: Any) -> Any:
             for key, item in value.items()
         }
     return value
+

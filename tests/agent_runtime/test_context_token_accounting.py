@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from web_server import (
     build_context_workspace_snapshot,
-    context_workbench_suggestions_payload,
+    context_transcript_stats,
     estimate_token_count,
     format_token_count,
     record_context_tool_weight_source,
@@ -59,19 +59,17 @@ def test_context_weight_source_matches_context_map_visible_fields() -> None:
     assert "notes.md" not in tool_source
 
 
-def test_suggestions_and_snapshot_use_context_weight_source_counts() -> None:
+def test_review_stats_and_snapshot_use_context_weight_source_counts() -> None:
     record = make_assistant_record()
     expected_total = estimate_token_count(record_context_weight_source(record))
     expected_tool = estimate_token_count(record_context_tool_weight_source(record))
     session = SimpleNamespace(title="Token test", scope="chat", transcript=[record])
 
-    suggestions = context_workbench_suggestions_payload(session)
-    node = suggestions["nodes"][0]
+    stats = context_transcript_stats(session.transcript)
 
-    assert suggestions["stats"]["total_token_count"] == expected_total
-    assert suggestions["stats"]["tool_token_count"] == expected_tool
-    assert node["token_count"] == expected_total
-    assert node["tool_token_count"] == expected_tool
+    assert stats["node_count"] == 1
+    assert stats["token_count"] == expected_total
+    assert stats["tool_token_count"] == expected_tool
 
     snapshot = build_context_workspace_snapshot(session)
 

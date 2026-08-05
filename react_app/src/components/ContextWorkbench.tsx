@@ -5,24 +5,25 @@ import { flushSync } from 'react-dom';
 import {
   cancelActiveRequest,
   clearContextWorkbenchHistoryRequest,
+  contextReviewRequest,
   deleteContextWorkbenchMessageRequest,
   fetchContextWorkbenchSettings,
-  fetchContextWorkbenchSuggestionsRequest,
   restoreContextRevisionRequest,
   saveContextWorkbenchSettingsRequest,
+  sessionUsageRequest,
   streamContextChatRequest,
+  undoContextRestoreRequest,
 } from '../api';
 import {
   DEFAULT_CONTEXT_TOKEN_THRESHOLDS,
   normalizeContextTokenThresholds,
-  type ContextMessageTokenStat,
   type ContextTokenThresholds,
 } from '../contextTokenWeight';
 import type {
+  ContextReview,
+  ContextRestoreResponse,
   ContextRevisionSummary,
   ContextWorkbenchHistoryEntry,
-  ContextWorkbenchSuggestionNode,
-  ContextWorkbenchSuggestionStats,
   ContextWorkbenchToolCatalogItem,
   MessageRecord,
   PendingContextRestore,
@@ -30,13 +31,15 @@ import type {
   ResponseProviderDraft,
   ResponseProviderModel,
   ResponseProviderSettings,
+  SessionUsageBucket,
+  SessionUsageSummary,
 } from '../types';
 import { copyText, getReasoningLabel, normalizeConversation } from '../utils';
 import ChatModelPicker from './ChatModelPicker';
 import Dropdown from './Dropdown';
 import MarkdownRenderer from './MarkdownRenderer';
 
-type WorkbenchTab = 'suggestions' | 'manual' | 'restore' | 'settings';
+type WorkbenchTab = 'suggestions' | 'manual' | 'usage' | 'restore' | 'settings';
 
 interface ManualWorkbenchMessage {
   id: string;
@@ -47,9 +50,7 @@ interface ManualWorkbenchMessage {
 
 interface ContextWorkbenchProps {
   messages: MessageRecord[];
-  messageTokenStats: ContextMessageTokenStat[];
   selectedNodeIndexes: number[];
-  criticalNodeIndexes: number[];
   tokenThresholds: ContextTokenThresholds;
   sessionId: string;
   isMainChatBusy: boolean;
@@ -62,16 +63,13 @@ interface ContextWorkbenchProps {
   onContextInputChange: (sessionId: string, conversation: MessageRecord[]) => void;
   onRevisionHistoryChange: (sessionId: string, revisions: ContextRevisionSummary[]) => void;
   onPendingRestoreChange: (sessionId: string, pendingRestore: PendingContextRestore | null) => void;
+  onReviewPreviewStateChange: (active: boolean) => void;
   onEnsureSession: () => Promise<string>;
   onTokenThresholdsChange: (thresholds: ContextTokenThresholds) => void;
 }
 
 const DEFAULT_WORKBENCH_MODELS = ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.2'];
 const DEFAULT_WORKBENCH_PROVIDER_ID = 'openai';
-const EMPTY_SUGGESTION_STATS: ContextWorkbenchSuggestionStats = {
-  total_token_count: 0,
-  tool_token_count: 0,
-};
 
 const WORKBENCH_TABS: Array<{
   id: WorkbenchTab;
@@ -80,6 +78,7 @@ const WORKBENCH_TABS: Array<{
 }> = [
   { id: 'suggestions', label: '建议', icon: 'ph-lightbulb' },
   { id: 'manual', label: '手动', icon: 'ph-hand-pointing' },
+  { id: 'usage', label: '用量', icon: 'ph-chart-bar' },
   { id: 'restore', label: '恢复', icon: 'ph-arrow-counter-clockwise' },
   { id: 'settings', label: '设置', icon: 'ph-gear' },
 ];
@@ -249,13 +248,70 @@ function formatTokenCount(value: number) {
   return value.toLocaleString('zh-CN');
 }
 
+function formatContextReviewDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function contextReviewReductionPercent(review: ContextReview | null) {
+  const before = Number(review?.before?.token_count || 0);
+  const after = Number(review?.after?.token_count || 0);
+  if (before <= 0 || after >= before) {
+    return '';
+  }
+  return `${Math.round(((before - after) / before) * 100)}%`;
+}
+
+function emptyUsageBucket(): SessionUsageBucket {
+  return {
+    request_count: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    cache_write_tokens: 0,
+    non_cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 0,
+  };
+}
+
+function UsageCard({
+  title,
+  description,
+  bucket,
+}: {
+  title: string;
+  description: string;
+  bucket?: SessionUsageBucket;
+}) {
+  const usage = bucket || emptyUsageBucket();
+  return (
+    <div className="workbench-setting-card session-usage-card">
+      <div className="workbench-setting-title">{title}</div>
+      <div className="workbench-setting-desc">{description}</div>
+      <div className="session-usage-grid">
+        <div><span>请求</span><strong>{usage.request_count}</strong></div>
+        <div><span>输入</span><strong>{formatTokenCount(usage.input_tokens)}</strong></div>
+        <div><span>缓存输入</span><strong>{formatTokenCount(usage.cached_input_tokens)}</strong></div>
+        <div><span>输出</span><strong>{formatTokenCount(usage.output_tokens)}</strong></div>
+        <div><span>推理</span><strong>{formatTokenCount(usage.reasoning_tokens)}</strong></div>
+        <div><span>总计</span><strong>{formatTokenCount(usage.total_tokens)}</strong></div>
+      </div>
+    </div>
+  );
+}
+
 function parseTokenThresholdDraft(value: string, fallback: number) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function formatSuggestionRoleLabel(role: ContextWorkbenchSuggestionNode['role']) {
-  return role === 'user' ? '用户' : '助手';
 }
 
 function isAbortError(error: unknown) {
@@ -264,40 +320,20 @@ function isAbortError(error: unknown) {
 
 function localizeToolCatalogItem(tool: ContextWorkbenchToolCatalogItem) {
   switch (tool.id) {
-    case 'get_context_node_details':
+    case 'get_nodes':
       return {
         label: '展开节点详情',
         description: '把一个或多个节点展开成完整内容和可编辑条目视图，再决定要不要编辑。',
       };
-    case 'delete_context_item':
+    case 'write_nodes':
       return {
-        label: '删除单个条目',
-        description: '删除某个节点里的一个条目。',
+        label: '批量编辑节点',
+        description: '一次完成节点删除、插入、替换或压缩，并返回更新后的工作快照。',
       };
-    case 'replace_context_item':
+    case 'write_items':
       return {
-        label: '替换单个条目',
-        description: '把某个节点里的一个条目替换成新的内容。',
-      };
-    case 'compress_context_item':
-      return {
-        label: '压缩单个条目',
-        description: '把某个条目压缩成更短的版本，同时保留原来的条目类型。',
-      };
-    case 'compress_context_nodes':
-      return {
-        label: '压缩节点',
-        description: '把一个或多个节点压缩成新的摘要节点，作用在当前工作快照上。',
-      };
-    case 'delete_context_nodes':
-      return {
-        label: '删除节点',
-        description: '从当前工作快照里删除一个或多个节点。',
-      };
-    case 'confirm_working_snapshot':
-      return {
-        label: '最终确认',
-        description: '在本轮编辑都完成后，确认当前工作快照里所有仍然有效的节点概览。',
+        label: '编辑节点条目',
+        description: '只有节点级编辑无法保留必要结构时，才精确编辑节点内部条目。',
       };
     default:
       return {
@@ -309,9 +345,7 @@ function localizeToolCatalogItem(tool: ContextWorkbenchToolCatalogItem) {
 
 export default function ContextWorkbench({
   messages,
-  messageTokenStats,
   selectedNodeIndexes,
-  criticalNodeIndexes,
   tokenThresholds,
   sessionId,
   isMainChatBusy,
@@ -324,6 +358,7 @@ export default function ContextWorkbench({
   onContextInputChange,
   onRevisionHistoryChange,
   onPendingRestoreChange,
+  onReviewPreviewStateChange,
   onEnsureSession,
   onTokenThresholdsChange,
 }: ContextWorkbenchProps) {
@@ -350,10 +385,18 @@ export default function ContextWorkbench({
   const [availableProviders, setAvailableProviders] = useState<ResponseProviderDraft[]>([]);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
   const [toolCatalog, setToolCatalog] = useState<ContextWorkbenchToolCatalogItem[]>([]);
-  const [suggestionStats, setSuggestionStats] = useState<ContextWorkbenchSuggestionStats>(EMPTY_SUGGESTION_STATS);
-  const [suggestionNodes, setSuggestionNodes] = useState<ContextWorkbenchSuggestionNode[]>([]);
-  const [isSuggestionsLoading, setIsSuggestionsLoading] = useState(true);
+  const [pendingContextReview, setPendingContextReview] = useState<ContextReview | null>(null);
+  const [contextReviewAction, setContextReviewAction] = useState<'generate' | 'preview' | 'apply' | 'discard' | null>(null);
+  const [isContextPreviewActive, setIsContextPreviewActive] = useState(false);
+  const [isSuggestionsLoading, setIsSuggestionsLoading] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
+  const [suggestionsMessage, setSuggestionsMessage] = useState('');
+  const [usageSummary, setUsageSummary] = useState<SessionUsageSummary | null>(null);
+  const [isUsageLoading, setIsUsageLoading] = useState(false);
+  const [usageFeedback, setUsageFeedback] = useState('');
+  const [usageFeedbackError, setUsageFeedbackError] = useState(false);
+  const [contextReviewAutoEnabled, setContextReviewAutoEnabled] = useState(true);
+  const [contextReviewIntervalDraft, setContextReviewIntervalDraft] = useState('10');
   const [isSettingsLoading, setIsSettingsLoading] = useState(true);
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState('');
@@ -364,6 +407,13 @@ export default function ContextWorkbench({
   const manualActiveSessionIdRef = useRef('');
   const manualStopRequestedRef = useRef(false);
   const manualStopRequestRef = useRef<Promise<unknown> | null>(null);
+  const previewOriginalMessagesRef = useRef<{
+    sessionId: string;
+    reviewId: string;
+    messages: MessageRecord[];
+  } | null>(null);
+  const onContextInputChangeRef = useRef(onContextInputChange);
+  const onReviewPreviewStateChangeRef = useRef(onReviewPreviewStateChange);
 
   const selectedNodeNumbers = useMemo(
     () => [...selectedNodeIndexes].sort((left, right) => left - right).map((index) => index + 1),
@@ -377,43 +427,14 @@ export default function ContextWorkbench({
     () => availableProviders.find((provider) => provider.id === workbenchProviderDraft),
     [availableProviders, workbenchProviderDraft],
   );
-  const criticalNodeIndexSet = useMemo(
-    () => new Set(criticalNodeIndexes),
-    [criticalNodeIndexes],
-  );
-  const localSuggestionStats = useMemo(
-    () => ({
-      total_token_count: messageTokenStats.reduce((total, stat) => total + stat.tokens, 0),
-      tool_token_count: messageTokenStats.reduce((total, stat) => total + stat.toolTokens, 0),
-    }),
-    [messageTokenStats],
-  );
-  const localSuggestionNodes = useMemo(
-    () =>
-      messageTokenStats
-        .filter((stat) => stat.isEditable && stat.editableNodeIndex !== null && stat.editableNodeNumber !== null)
-        .map((stat): ContextWorkbenchSuggestionNode => ({
-          node_index: stat.editableNodeIndex ?? 0,
-          node_number: stat.editableNodeNumber ?? 0,
-          role: stat.role,
-          token_count: stat.tokens,
-          tool_token_count: stat.toolTokens,
-          preview: '',
-        }))
-        .sort((left, right) => right.token_count - left.token_count || left.node_number - right.node_number),
-    [messageTokenStats],
-  );
-  const criticalSuggestionNodes = useMemo(
-    () => localSuggestionNodes.filter((node) => criticalNodeIndexSet.has(node.node_index)),
-    [localSuggestionNodes, criticalNodeIndexSet],
-  );
   const manualHistoryKey = useMemo(() => JSON.stringify(history || []), [history]);
-  const isWorkbenchBusy = isManualSending || isRestoreBusy;
+  const isWorkbenchBusy = isManualSending || isRestoreBusy || contextReviewAction !== null;
   const isManualComposerLocked = isMainChatBusy || isWorkbenchBusy;
   const manualReasoningDisabled = reasoningOptions.length === 0;
   const isRestoreLocked = isMainChatBusy || isRestoreBusy;
   const hasClearableManualHistory = manualMessages.some((message) => !message.pending);
   const currentManualReasoningLabel = getReasoningLabel(manualReasoning, reasoningOptions);
+  const pendingReviewReduction = contextReviewReductionPercent(pendingContextReview);
   const nextTokenThresholds = useMemo(() => {
     const warningThreshold = parseTokenThresholdDraft(
       tokenWarningThresholdDraft,
@@ -433,8 +454,28 @@ export default function ContextWorkbench({
     nextTokenThresholds.warningThreshold >= nextTokenThresholds.criticalThreshold
       ? '红色阈值必须大于黄色阈值'
       : '';
+  const parsedContextReviewInterval = Number(contextReviewIntervalDraft);
+  const contextReviewIntervalError = contextReviewAutoEnabled && (
+    !Number.isInteger(parsedContextReviewInterval)
+    || parsedContextReviewInterval < 1
+    || parsedContextReviewInterval > 1440
+  )
+    ? '闲置分钟必须是 1–1440 之间的整数'
+    : '';
 
-  void pendingRestore;
+  useEffect(() => {
+    onContextInputChangeRef.current = onContextInputChange;
+    onReviewPreviewStateChangeRef.current = onReviewPreviewStateChange;
+  }, [onContextInputChange, onReviewPreviewStateChange]);
+
+  useEffect(() => () => {
+    const preview = previewOriginalMessagesRef.current;
+    if (preview) {
+      onContextInputChangeRef.current(preview.sessionId, preview.messages);
+      previewOriginalMessagesRef.current = null;
+    }
+    onReviewPreviewStateChangeRef.current(false);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -466,6 +507,8 @@ export default function ContextWorkbench({
         });
         setTokenWarningThresholdDraft(String(nextThresholds.warningThreshold));
         setTokenCriticalThresholdDraft(String(nextThresholds.criticalThreshold));
+        setContextReviewAutoEnabled(response.settings.context_review_auto_enabled !== false);
+        setContextReviewIntervalDraft(String(response.settings.context_review_interval_minutes || 10));
         onTokenThresholdsChange(nextThresholds);
         setAvailableProviders(nextProviders);
         setToolCatalog(response.tool_catalog || []);
@@ -492,50 +535,97 @@ export default function ContextWorkbench({
 
   useEffect(() => {
     let cancelled = false;
+    let pollTimer: number | null = null;
 
-    async function loadSuggestions() {
+    async function loadContextReview(showLoading: boolean) {
       if (!sessionId) {
-        setSuggestionStats(EMPTY_SUGGESTION_STATS);
-        setSuggestionNodes([]);
+        setPendingContextReview(null);
         setSuggestionsError('');
         setIsSuggestionsLoading(false);
         return;
       }
-
-      setIsSuggestionsLoading(true);
-      setSuggestionsError('');
-
+      if (showLoading) {
+        setIsSuggestionsLoading(true);
+      }
       try {
-        const response = await fetchContextWorkbenchSuggestionsRequest({
-          session_id: sessionId,
-        });
-
-        if (cancelled) {
-          return;
-        }
-
-        setSuggestionStats(response.stats || EMPTY_SUGGESTION_STATS);
-        setSuggestionNodes(response.nodes || []);
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-
-        setSuggestionStats(EMPTY_SUGGESTION_STATS);
-        setSuggestionNodes([]);
-        setSuggestionsError(getThrownMessage(error));
-      } finally {
+        const response = await contextReviewRequest({ session_id: sessionId, action: 'status' });
         if (!cancelled) {
+          const nextReview = response.review || null;
+          const preview = previewOriginalMessagesRef.current;
+          if (preview && (!nextReview || nextReview.id !== preview.reviewId)) {
+            onContextInputChange(preview.sessionId, preview.messages);
+            previewOriginalMessagesRef.current = null;
+            setIsContextPreviewActive(false);
+            onReviewPreviewStateChange(false);
+          }
+          setPendingContextReview(nextReview);
+          setSuggestionsError('');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSuggestionsError(getThrownMessage(error));
+        }
+      } finally {
+        if (!cancelled && showLoading) {
           setIsSuggestionsLoading(false);
         }
       }
     }
 
-    void loadSuggestions();
+    closeContextReviewPreview(true);
+    void loadContextReview(true);
+    if (activeTab === 'suggestions' && !isMainChatBusy) {
+      pollTimer = window.setInterval(() => void loadContextReview(false), 5000);
+    }
+    return () => {
+      cancelled = true;
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+      }
+    };
+  }, [activeTab, isMainChatBusy, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (activeTab !== 'usage') {
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!sessionId) {
+      setUsageSummary(null);
+      setUsageFeedback('');
+      setUsageFeedbackError(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setIsUsageLoading(true);
+    setUsageFeedback('');
+    setUsageFeedbackError(false);
+    void sessionUsageRequest({ session_id: sessionId, action: 'status' })
+      .then((response) => {
+        if (!cancelled) {
+          setUsageSummary(response.summary);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setUsageFeedback(getThrownMessage(error));
+          setUsageFeedbackError(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsUsageLoading(false);
+        }
+      });
+
     return () => {
       cancelled = true;
     };
-  }, [messages, sessionId]);
+  }, [activeTab, sessionId]);
 
   useEffect(() => {
     setManualMessages(buildManualMessagesFromHistory(history));
@@ -605,6 +695,11 @@ export default function ContextWorkbench({
       setSettingsError(tokenThresholdError);
       return;
     }
+    if (contextReviewIntervalError) {
+      setSettingsMessage('');
+      setSettingsError(contextReviewIntervalError);
+      return;
+    }
 
     setIsSettingsSaving(true);
     setSettingsMessage('');
@@ -616,6 +711,8 @@ export default function ContextWorkbench({
         context_workbench_provider_id: nextProviderId,
         context_token_warning_threshold: nextTokenThresholds.warningThreshold,
         context_token_critical_threshold: nextTokenThresholds.criticalThreshold,
+        context_review_auto_enabled: contextReviewAutoEnabled,
+        context_review_interval_minutes: parsedContextReviewInterval,
       });
       const savedModel = response.settings.context_workbench_model || nextModel;
       const nextProviders = Array.isArray(response.response_providers)
@@ -634,6 +731,8 @@ export default function ContextWorkbench({
       });
       setTokenWarningThresholdDraft(String(savedThresholds.warningThreshold));
       setTokenCriticalThresholdDraft(String(savedThresholds.criticalThreshold));
+      setContextReviewAutoEnabled(response.settings.context_review_auto_enabled !== false);
+      setContextReviewIntervalDraft(String(response.settings.context_review_interval_minutes || 10));
       onTokenThresholdsChange(savedThresholds);
       setAvailableProviders(nextProviders);
       setToolCatalog(response.tool_catalog || []);
@@ -797,6 +896,19 @@ export default function ContextWorkbench({
     }
   }
 
+  function applyContextRestoreResponse(response: ContextRestoreResponse) {
+    startTransition(() => {
+      onHistoryChange(sessionId, response.history || []);
+      onConversationChange(sessionId, normalizeConversation(response.conversation));
+      if (response.context_input) {
+        onContextInputChange(sessionId, normalizeConversation(response.context_input));
+      }
+      onRevisionHistoryChange(sessionId, response.revisions || []);
+      onPendingRestoreChange(sessionId, response.pending_restore || null);
+      setManualMessages(buildManualMessagesFromHistory(response.history || []));
+    });
+  }
+
   async function handleRestoreRevision(revisionId: string) {
     if (!sessionId || !revisionId || isRestoreLocked) {
       return;
@@ -810,16 +922,25 @@ export default function ContextWorkbench({
         session_id: sessionId,
         revision_id: revisionId,
       });
-      startTransition(() => {
-        onHistoryChange(sessionId, response.history || []);
-        onConversationChange(sessionId, normalizeConversation(response.conversation));
-        if (response.context_input) {
-          onContextInputChange(sessionId, normalizeConversation(response.context_input));
-        }
-        onRevisionHistoryChange(sessionId, response.revisions || []);
-        onPendingRestoreChange(sessionId, response.pending_restore || null);
-        setManualMessages(buildManualMessagesFromHistory(response.history || []));
-      });
+      applyContextRestoreResponse(response);
+    } catch (error) {
+      setRestoreError(getThrownMessage(error));
+    } finally {
+      setIsRestoreBusy(false);
+    }
+  }
+
+  async function handleUndoContextRestore() {
+    if (!sessionId || !pendingRestore?.can_undo || isRestoreLocked) {
+      return;
+    }
+
+    setIsRestoreBusy(true);
+    setRestoreError('');
+
+    try {
+      const response = await undoContextRestoreRequest({ session_id: sessionId });
+      applyContextRestoreResponse(response);
     } catch (error) {
       setRestoreError(getThrownMessage(error));
     } finally {
@@ -905,6 +1026,163 @@ export default function ContextWorkbench({
     }
   }
 
+  function closeContextReviewPreview(restoreLiveContext = true) {
+    const preview = previewOriginalMessagesRef.current;
+    if (restoreLiveContext && preview) {
+      onContextInputChange(preview.sessionId, preview.messages);
+    }
+    previewOriginalMessagesRef.current = null;
+    setIsContextPreviewActive(false);
+    onReviewPreviewStateChange(false);
+  }
+
+  async function handleGenerateContextReview() {
+    if (!sessionId || isMainChatBusy || contextReviewAction !== null) {
+      return;
+    }
+    setContextReviewAction('generate');
+    setSuggestionsError('');
+    setSuggestionsMessage('');
+    try {
+      const response = await contextReviewRequest({ session_id: sessionId, action: 'generate' });
+      setPendingContextReview(response.review || null);
+      if (!response.review) {
+        setSuggestionsMessage('当前没有足够明确且安全的整理收益，正式上下文保持不变。');
+      }
+    } catch (error) {
+      setSuggestionsError(getThrownMessage(error));
+    } finally {
+      setContextReviewAction(null);
+    }
+  }
+
+  function handlePreviewContextReview() {
+    if (!pendingContextReview || contextReviewAction !== null || isContextPreviewActive) {
+      return;
+    }
+    previewOriginalMessagesRef.current = {
+      sessionId,
+      reviewId: pendingContextReview.id,
+      messages: normalizeConversation(messages),
+    };
+    onContextInputChange(sessionId, normalizeConversation(pendingContextReview.proposed_transcript));
+    setIsContextPreviewActive(true);
+    onReviewPreviewStateChange(true);
+    setSuggestionsError('');
+    setSuggestionsMessage('左侧上下文地图正在显示建议版本；正式上下文尚未改变。');
+  }
+
+  async function handleApplyContextReview() {
+    if (!pendingContextReview || isMainChatBusy || contextReviewAction !== null) {
+      return;
+    }
+    if (!window.confirm('应用这条建议并生成一个可恢复的新版本吗？')) {
+      return;
+    }
+    setContextReviewAction('apply');
+    setSuggestionsError('');
+    setSuggestionsMessage('');
+    try {
+      const response = await contextReviewRequest({
+        session_id: sessionId,
+        action: 'apply',
+        review_id: pendingContextReview.id,
+      });
+      closeContextReviewPreview(false);
+      setPendingContextReview(null);
+      if (response.history) {
+        onHistoryChange(sessionId, response.history);
+        setManualMessages(buildManualMessagesFromHistory(response.history));
+      }
+      if (response.conversation) {
+        onConversationChange(sessionId, normalizeConversation(response.conversation));
+      }
+      if (response.context_input) {
+        onContextInputChange(sessionId, normalizeConversation(response.context_input));
+      }
+      if (response.revisions) {
+        onRevisionHistoryChange(sessionId, response.revisions);
+      }
+      onPendingRestoreChange(sessionId, response.pending_restore || null);
+      setSuggestionsMessage('建议已应用，并已写入恢复页的新版本。');
+    } catch (error) {
+      setSuggestionsError(getThrownMessage(error));
+      try {
+        const status = await contextReviewRequest({ session_id: sessionId, action: 'status' });
+        setPendingContextReview(status.review || null);
+        if (!status.review) {
+          closeContextReviewPreview(true);
+        }
+      } catch {
+        // Preserve the current preview when the status cannot be confirmed.
+      }
+    } finally {
+      setContextReviewAction(null);
+    }
+  }
+
+  async function handleDiscardContextReview() {
+    if (!pendingContextReview || contextReviewAction !== null) {
+      return;
+    }
+    setContextReviewAction('discard');
+    setSuggestionsError('');
+    setSuggestionsMessage('');
+    closeContextReviewPreview(true);
+    try {
+      await contextReviewRequest({
+        session_id: sessionId,
+        action: 'discard',
+        review_id: pendingContextReview.id,
+      });
+      setPendingContextReview(null);
+    } catch (error) {
+      setSuggestionsError(getThrownMessage(error));
+    } finally {
+      setContextReviewAction(null);
+    }
+  }
+
+  async function handleRefreshUsage() {
+    if (!sessionId || isUsageLoading) {
+      return;
+    }
+    setIsUsageLoading(true);
+    setUsageFeedback('');
+    setUsageFeedbackError(false);
+    try {
+      const response = await sessionUsageRequest({ session_id: sessionId, action: 'status' });
+      setUsageSummary(response.summary);
+    } catch (error) {
+      setUsageFeedback(getThrownMessage(error));
+      setUsageFeedbackError(true);
+    } finally {
+      setIsUsageLoading(false);
+    }
+  }
+
+  async function handleResetUsage() {
+    if (!sessionId || isUsageLoading) {
+      return;
+    }
+    if (!window.confirm('清空这个会话已经累计的 Provider 用量吗？')) {
+      return;
+    }
+    setIsUsageLoading(true);
+    setUsageFeedback('');
+    setUsageFeedbackError(false);
+    try {
+      const response = await sessionUsageRequest({ session_id: sessionId, action: 'reset' });
+      setUsageSummary(response.summary);
+      setUsageFeedback('这个会话的用量计数已清空。');
+    } catch (error) {
+      setUsageFeedback(getThrownMessage(error));
+      setUsageFeedbackError(true);
+    } finally {
+      setIsUsageLoading(false);
+    }
+  }
+
   return (
     <>
       <div className="extended-header">
@@ -931,81 +1209,101 @@ export default function ContextWorkbench({
         >
           <section className="extended-page" data-page="suggestions">
             <div className="extended-page-scroll">
-              <div className="workbench-panel-title">Token 概览</div>
+              <div className="workbench-panel-title">上下文建议</div>
               <div className="workbench-panel-desc">
-                这里是token 统计，你可以直观看到token情况，再决定要不要去手动页处理。
-              </div>
-
-              <div className="suggestion-card-grid">
-                <div className="suggestion-card">
-                  <div className="suggestion-card-label">总 Token 数</div>
-                  <div className="suggestion-card-value">{formatTokenCount(localSuggestionStats.total_token_count)}</div>
-                  <div className="suggestion-card-note">
-                    这里和左侧上下文地图使用同一个 token 计数器，统计当前地图里的节点内容。
-                  </div>
-                </div>
-                <div className="suggestion-card">
-                  <div className="suggestion-card-label">工具调用 Token</div>
-                  <div className="suggestion-card-value">{formatTokenCount(localSuggestionStats.tool_token_count)}</div>
-                  <div className="suggestion-card-note">
-                    这里按同一套计数器统计工具展示内容和工具输出占用的 token。
-                  </div>
-                </div>
-                <div className="suggestion-card">
-                  <div className="suggestion-card-label">当前聚焦</div>
-                  <div className="suggestion-card-value">{selectedNodeNumbers.length || '全部'}</div>
-                  <div className="suggestion-card-note">
-                    {selectedNodeReferenceSegments.length
-                      ? `手动页会优先围绕节点 #${selectedNodeReferenceSegments.join(' / ')} 来看。`
-                      : '当前没有单独选中节点，所以手动页会基于整份上下文来处理。'}
-                  </div>
-                </div>
+                上下文模型先生成待审核草稿。预览和丢弃不会改正式上下文，明确应用后才会生成可恢复版本。
               </div>
 
               {suggestionsError ? <div className="workbench-setting-feedback error">{suggestionsError}</div> : null}
+              {suggestionsMessage ? <div className="workbench-setting-feedback">{suggestionsMessage}</div> : null}
 
-              <div className="suggestion-stack">
-                <div className="workbench-setting-card">
-                  <div className="workbench-setting-title">节点 Token 明细</div>
-                  <div className="workbench-setting-desc">
-                    这里只显示 minimap 里的红色节点。
+              {pendingContextReview ? (
+                <div className="context-review-card workbench-setting-card">
+                  <div className="context-review-card-header">
+                    <div>
+                      <div className="workbench-setting-title">待审核整理建议</div>
+                      <div className="workbench-setting-desc">
+                        {formatContextReviewDate(pendingContextReview.created_at)
+                          ? `生成时间：${formatContextReviewDate(pendingContextReview.created_at)}`
+                          : '由上下文模型生成'}
+                      </div>
+                    </div>
+                    <span className="context-review-status">
+                      {pendingContextReview.source === 'auto_idle' ? '自动' : '手动'}
+                    </span>
                   </div>
 
-                  {isSuggestionsLoading && !localSuggestionNodes.length ? (
-                    <div className="suggestion-row">
-                      <div className="suggestion-row-title">正在统计 Token...</div>
-                      <div className="suggestion-row-body">
-                        这一步会把主聊天当前真正会发给模型的上下文一起算进去。
+                  <div className="context-review-summary">{pendingContextReview.summary}</div>
+
+                  <div className="context-review-stats" aria-label="建议变化统计">
+                    <div className="context-review-stat">
+                      <div className="suggestion-card-label">整理前</div>
+                      <div className="suggestion-card-value">{pendingContextReview.before.node_count}</div>
+                      <div className="suggestion-card-note">
+                        {formatTokenCount(pendingContextReview.before.token_count)} Tokens
                       </div>
                     </div>
-                  ) : criticalSuggestionNodes.length ? (
-                    criticalSuggestionNodes.map((node) => (
-                      <div className="suggestion-row" key={node.node_index}>
-                        <div className="suggestion-row-copy">
-                          <div className="suggestion-row-title">节点 #{node.node_number}</div>
-                          <div className="restore-revision-meta">
-                            {formatSuggestionRoleLabel(node.role)} · {formatTokenCount(node.token_count)} Token
-                            {node.tool_token_count > 0
-                              ? ` · 工具调用 ${formatTokenCount(node.tool_token_count)} Token`
-                              : ''}
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  ) : localSuggestionNodes.length ? (
-                    <div className="suggestion-row">
-                      <div className="suggestion-row-title">当前没有红色节点</div>
-                    </div>
-                  ) : (
-                    <div className="suggestion-row">
-                      <div className="suggestion-row-title">当前还没有可统计的节点</div>
-                      <div className="suggestion-row-body">
-                        等主聊天里有实际上下文之后，这里就会列出每个节点的 Token 数。
+                    <div className="context-review-stat">
+                      <div className="suggestion-card-label">整理后</div>
+                      <div className="suggestion-card-value">{pendingContextReview.after.node_count}</div>
+                      <div className="suggestion-card-note">
+                        {formatTokenCount(pendingContextReview.after.token_count)} Tokens
                       </div>
                     </div>
-                  )}
+                    <div className="context-review-stat">
+                      <div className="suggestion-card-label">预计减少</div>
+                      <div className="suggestion-card-value">{pendingReviewReduction || '-'}</div>
+                      <div className="suggestion-card-note">基于当前上下文估算</div>
+                    </div>
+                  </div>
+
+                  <div className="context-review-actions">
+                    <button
+                      className="tool-btn-capsule"
+                      disabled={contextReviewAction !== null}
+                      type="button"
+                      onClick={isContextPreviewActive ? () => closeContextReviewPreview(true) : handlePreviewContextReview}
+                    >
+                      {isContextPreviewActive ? '关闭预览' : '预览'}
+                    </button>
+                    <button
+                      className="tool-btn-primary"
+                      disabled={contextReviewAction !== null || isMainChatBusy}
+                      type="button"
+                      onClick={() => void handleApplyContextReview()}
+                    >
+                      {contextReviewAction === 'apply' ? '应用中...' : '应用并保存版本'}
+                    </button>
+                    <button
+                      className="tool-btn-capsule"
+                      disabled={contextReviewAction !== null}
+                      type="button"
+                      onClick={() => void handleDiscardContextReview()}
+                    >
+                      {contextReviewAction === 'discard' ? '丢弃中...' : '丢弃'}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="context-review-empty workbench-setting-card">
+                  <div className="workbench-setting-title">
+                    {isSuggestionsLoading ? '正在读取建议...' : '暂无待审核建议'}
+                  </div>
+                  <div className="workbench-setting-desc">
+                    主聊天结束并达到设置的闲置时间后会自动分析。你也可以现在手动分析当前上下文。
+                  </div>
+                  <div className="context-review-actions">
+                    <button
+                      className="tool-btn-primary"
+                      disabled={contextReviewAction !== null || isMainChatBusy || !sessionId || isSuggestionsLoading}
+                      type="button"
+                      onClick={() => void handleGenerateContextReview()}
+                    >
+                      {contextReviewAction === 'generate' ? '分析中...' : '立即分析'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 
@@ -1162,6 +1460,63 @@ export default function ContextWorkbench({
             </div>
           </section>
 
+          <section className="extended-page" data-page="usage">
+            <div className="extended-page-scroll">
+              <div className="workbench-panel-title">会话用量</div>
+              <div className="workbench-panel-desc">
+                直接累计 HashCode 各模型 Provider 返回的真实 Token 用量，并区分主 Agent 与上下文模型。Provider 没有返回 usage 的请求不会被猜测补齐。
+              </div>
+
+              <div className="context-review-actions usage-actions-row">
+                <button
+                  className="tool-btn-capsule"
+                  disabled={!sessionId || isUsageLoading}
+                  type="button"
+                  onClick={() => void handleRefreshUsage()}
+                >
+                  {isUsageLoading ? '读取中...' : '刷新'}
+                </button>
+                <button
+                  className="tool-btn-capsule"
+                  disabled={!sessionId || isUsageLoading || !usageSummary?.request_count}
+                  type="button"
+                  onClick={() => void handleResetUsage()}
+                >
+                  清空计数
+                </button>
+                {usageSummary?.latest_at ? (
+                  <span className="session-usage-updated">
+                    最近记录：{formatContextReviewDate(usageSummary.latest_at)}
+                  </span>
+                ) : null}
+              </div>
+
+              {usageFeedback ? (
+                <div className={`workbench-setting-feedback${usageFeedbackError ? ' error' : ''}`}>
+                  {usageFeedback}
+                </div>
+              ) : null}
+
+              <div className="session-usage-stack">
+                <UsageCard
+                  bucket={usageSummary || undefined}
+                  description="当前会话中所有已上报 usage 的模型请求。"
+                  title="总用量"
+                />
+                <UsageCard
+                  bucket={usageSummary?.by_kind?.main}
+                  description="正常主聊天与工具回合的模型消耗。"
+                  title="主 Agent"
+                />
+                <UsageCard
+                  bucket={usageSummary?.by_kind?.context_workbench}
+                  description="手动整理、立即分析和闲置自动建议的模型消耗。"
+                  title="上下文模型"
+                />
+              </div>
+            </div>
+          </section>
+
           <section className="extended-page" data-page="restore">
             <div className="extended-page-scroll">
               <div className="workbench-panel-title">恢复记录</div>
@@ -1170,6 +1525,29 @@ export default function ContextWorkbench({
               </div>
 
               {restoreError ? <div className="workbench-setting-feedback error">{restoreError}</div> : null}
+
+              {pendingRestore?.can_undo ? (
+                <div className="workbench-setting-card restore-revision-card restore-undo-card">
+                  <div className="restore-revision-head">
+                    <div>
+                      <div className="restore-revision-title">已切换到 {pendingRestore.target_label}</div>
+                      <div className="restore-revision-summary">
+                        这次恢复还可以撤销，撤销后会回到恢复操作前的完整上下文。
+                      </div>
+                    </div>
+                    <button
+                      className="restore-revision-action"
+                      disabled={isRestoreLocked}
+                      type="button"
+                      onClick={() => {
+                        void handleUndoContextRestore();
+                      }}
+                    >
+                      {isRestoreBusy ? '处理中...' : '撤销这次恢复'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="restore-revision-list">
                 {revisions.length ? (
@@ -1276,6 +1654,62 @@ export default function ContextWorkbench({
               </div>
 
               <div className="workbench-setting-card">
+                <div className="workbench-setting-title">自动生成上下文建议</div>
+                <div className="workbench-setting-desc">
+                  主聊天结束并持续闲置后生成一条待审核提案；不会在后台直接修改正式上下文。
+                </div>
+
+                <div className="workbench-setting-control-row">
+                  <button
+                    aria-checked={contextReviewAutoEnabled}
+                    aria-label="自动生成上下文建议"
+                    className={`context-review-setting-switch${contextReviewAutoEnabled ? ' is-on' : ''}`}
+                    disabled={isSettingsLoading || isSettingsSaving}
+                    role="switch"
+                    type="button"
+                    onClick={() => {
+                      setContextReviewAutoEnabled((previous) => !previous);
+                      setSettingsMessage('');
+                      setSettingsError('');
+                    }}
+                  >
+                    <span />
+                  </button>
+
+                  {contextReviewAutoEnabled ? (
+                    <label className="workbench-token-threshold-field">
+                      <span>闲置分钟</span>
+                      <input
+                        className="settings-input settings-input-small"
+                        disabled={isSettingsLoading || isSettingsSaving}
+                        max={1440}
+                        min={1}
+                        type="number"
+                        value={contextReviewIntervalDraft}
+                        onChange={(event) => {
+                          setContextReviewIntervalDraft(event.target.value);
+                          setSettingsMessage('');
+                          setSettingsError('');
+                        }}
+                      />
+                    </label>
+                  ) : null}
+
+                  <button
+                    className="tool-btn-primary"
+                    disabled={isSettingsLoading || isSettingsSaving}
+                    type="button"
+                    onClick={() => void handleSaveWorkbenchSettings()}
+                  >
+                    {isSettingsSaving ? '保存中...' : '保存自动建议'}
+                  </button>
+                </div>
+                {contextReviewIntervalError ? (
+                  <div className="workbench-setting-feedback error">{contextReviewIntervalError}</div>
+                ) : null}
+              </div>
+
+              <div className="workbench-setting-card">
                 <div className="workbench-setting-title">Token 颜色阈值</div>
                 <div className="workbench-setting-desc">设置 minimap 的绿色、黄色、红色分段。</div>
 
@@ -1332,7 +1766,7 @@ export default function ContextWorkbench({
               <div className="workbench-setting-card">
                 <div className="workbench-setting-title">当前工具能力</div>
                 <div className="workbench-setting-desc">
-                  这些工具只服务当前上下文，不会去跑主任务。现在已经能做节点级查看，以及 item 级压缩、替换和删除。
+                  工具只服务当前上下文：先按需读取，再优先批量编辑节点；只有确有必要时才进入 item 级修改。
                 </div>
 
                 <div className="workbench-tool-grid">

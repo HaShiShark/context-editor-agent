@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import mimetypes
@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from simple_agent.agent import sanitize_text
+from app_agent.session_agent import sanitize_text
 
 from .paths import ATTACHMENTS_DIR, attachment_url_path, resolve_attachment_file_path
 
@@ -66,10 +66,10 @@ def parse_data_url(data_url: str) -> tuple[str, bytes]:
     try:
         raw_bytes = base64.b64decode(match.group("data"), validate=True)
     except Exception as exc:  # noqa: BLE001
-        raise ValueError("附件编码解析失败") from exc
+        raise ValueError("闄勪欢缂栫爜瑙ｆ瀽澶辫触") from exc
 
     if not raw_bytes:
-        raise ValueError("附件内容为空")
+        raise ValueError("闄勪欢鍐呭涓虹┖")
 
     return mime_type, raw_bytes
 
@@ -129,9 +129,9 @@ def persist_request_attachments(raw_attachments: Any) -> tuple[list[dict[str, ob
         total_size += len(raw_bytes)
 
         if len(raw_bytes) > MAX_ATTACHMENT_BYTES:
-            raise ValueError(f"附件 {original_name} 超过 50 MB")
+            raise ValueError(f"闄勪欢 {original_name} 瓒呰繃 50 MB")
         if total_size > MAX_TOTAL_ATTACHMENT_BYTES:
-            raise ValueError("本轮附件总大小超过 50 MB")
+            raise ValueError("鏈疆闄勪欢鎬诲ぇ灏忚秴杩?50 MB")
 
         suffix = Path(original_name).suffix
         if not suffix:
@@ -186,3 +186,4 @@ def attachment_inputs_from_records(attachments: list[dict[str, object]]) -> list
         inputs.append(build_attachment_input(name or file_path.name, safe_mime_type, data_url))
 
     return inputs
+

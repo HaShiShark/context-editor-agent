@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import threading
@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from simple_agent.agent import ToolEvent
+from app_agent.session_agent import ToolEvent
 from web_server import AppState, SessionState, normalize_transcript
 
 
@@ -57,9 +57,13 @@ class InMemoryAppState(AppState):
     def __init__(self) -> None:
         self.settings = SimpleNamespace(project_root=ROOT)
         self.lock = threading.Lock()
+        self._request_condition = threading.Condition(self.lock)
         self.projects = []
         self.chat_session_ids = []
         self.sessions = {}
+        self._context_review_timer_lock = threading.Lock()
+        self._context_review_timers = {}
+        self._auto_review_request_ids = set()
 
     def _hydrate_agent_locked(self, session: SessionState) -> None:
         return None
@@ -80,6 +84,8 @@ def make_session() -> SessionState:
         context_workbench_history=[],
         context_revisions=[],
         pending_context_restore=None,
+        pending_context_review=None,
+        usage_summary={},
     )
 
 
